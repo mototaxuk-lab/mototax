@@ -12,6 +12,7 @@ The webhook acknowledges Twilio immediately and does the real work
 hit Twilio's request timeout even if extraction takes a couple of seconds.
 """
 import datetime as dt
+import re
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
@@ -23,7 +24,7 @@ import tax
 import twilio_client as wa
 from models import (
     ExportLink, Record, SessionLocal, User, get_or_create_user, init_db,
-    latest_pending, make_export_link, now,
+    latest_editing, latest_pending, make_export_link, now,
 )
 
 app = FastAPI(title="Courier Tax & Records Assistant")
@@ -76,7 +77,7 @@ SETUP_COMPLETE = (
 
 HELP = (
     "Send a receipt or earnings screenshot, or type your mileage like \"145 miles\".\n"
-    "After I read something, reply 1 to confirm or 2 to discard.\n"
+    "After I read something, reply 1 to confirm, 2 to edit, or 3 to delete.\n"
     "Type CSV for your export, SUMMARY for your totals, or SETTINGS to update your profile."
 )
 
@@ -253,7 +254,26 @@ def _handle_media(db, user, number, params, num_media) -> None:
 
 
 def _handle_text(db, user, number, body) -> None:
-    low = body.lower()
+    low = body.lower().strip()
+
+    # If the user is mid-edit, the next message is the corrected value (or "cancel").
+    editing = latest_editing(db, user.id)
+    if editing:
+        if low in ("cancel", "stop"):
+            editing.confirmation_status = "pending"
+            db.commit()
+            wa.send_whatsapp(number, "Edit cancelled.\n\n" + _record_prompt(editing, user))
+            return
+        if _apply_edit(editing, body):
+            editing.confirmation_status = "pending"
+            db.commit()
+            wa.send_whatsapp(number, _record_prompt(editing, user, updated=True))
+            return
+        wa.send_whatsapp(
+            number,
+            "Send the corrected value (e.g. \"115 miles\" or \"£42\"), or type CANCEL.",
+        )
+        return
 
     if low in ("settings", "setting"):
         user.onboarding_step = "ask_vehicle"
@@ -272,7 +292,20 @@ def _handle_text(db, user, number, body) -> None:
         wa.send_whatsapp(number, "✅ Saved.")
         return
 
-    if low in ("2", "delete", "discard", "no", "n"):
+    if low in ("2", "edit", "change"):
+        rec = latest_pending(db, user.id)
+        if not rec:
+            wa.send_whatsapp(number, "Nothing waiting to edit. Send a photo or your mileage.")
+            return
+        rec.confirmation_status = "editing"
+        db.commit()
+        prompt = ("Send the corrected mileage (e.g. \"115 miles\")."
+                  if rec.record_type == "mileage"
+                  else "Send the corrected amount (e.g. \"£42\").")
+        wa.send_whatsapp(number, prompt)
+        return
+
+    if low in ("3", "delete", "discard", "no", "n"):
         rec = latest_pending(db, user.id)
         if rec:
             rec.confirmation_status = "rejected"
@@ -318,21 +351,27 @@ def _handle_text(db, user, number, body) -> None:
     wa.send_whatsapp(number, HELP)
 
 
-def _mileage_prompt(miles: float, user) -> str:
+# Shown after every detected/updated record so the user can correct it.
+_OPTIONS_FOOTER = "Reply 1 to confirm, 2 to edit, or 3 to delete."
+
+
+def _mileage_prompt(miles: float, user, updated: bool = False) -> str:
     """Confirmation text for a mileage entry, with deduction + tax-benefit estimate."""
     deduction = tax.mileage_deduction(miles, user.vehicle_type)
+    lead = "Updated to" if updated else "I logged"
     msg = (
-        f"I logged {miles:.0f} delivery miles for this week.\n"
+        f"{lead} {miles:.0f} delivery miles for this week.\n"
         f"Estimated mileage deduction: £{deduction:.0f}"
     )
     if user.tax_rate:
         benefit = tax.tax_benefit(deduction, user.tax_rate)
         msg += f"\nEstimated tax benefit: up to ~£{benefit:.0f} (at {user.tax_rate * 100:.0f}% tax rate)"
-    msg += "\n\nReply 1 to confirm or 2 to delete."
+    msg += f"\n\n{_OPTIONS_FOOTER}"
     return msg
 
 
 def _confirmation_prompt(data: dict, user) -> str:
+    """First-time confirmation prompt built from a fresh extraction dict."""
     if data["record_type"] == "mileage":
         return _mileage_prompt(data["miles"], user)
 
@@ -340,9 +379,47 @@ def _confirmation_prompt(data: dict, user) -> str:
     vendor = data["platform_or_vendor"] or data["category"]
     detail = f"{vendor}, {amount}, {data['category']}"
 
-    msg = f"Detected: {detail} (dated {data['record_date']}).\nReply 1 to confirm, 2 to discard."
+    msg = f"Detected: {detail} (dated {data['record_date']}).\n{_OPTIONS_FOOTER}"
     if data["confidence"] < config.CONFIDENCE_WARN_THRESHOLD:
         msg += "\n⚠️ I'm not fully sure on this one — please double-check the figures."
     if data["notes"]:
         msg += f"\nNote: {data['notes']}"
     return msg
+
+
+def _record_prompt(rec: Record, user, updated: bool = False) -> str:
+    """Re-prompt built from a stored record (used after an edit or cancel)."""
+    if rec.record_type == "mileage":
+        return _mileage_prompt(rec.miles or 0, user, updated=updated)
+
+    amount = f"£{rec.amount:.2f}" if rec.amount is not None else "£?"
+    vendor = rec.platform_or_vendor or rec.category
+    lead = "Updated" if updated else "Detected"
+    return f"{lead}: {vendor}, {amount}, {rec.category}.\n{_OPTIONS_FOOTER}"
+
+
+def _apply_edit(rec: Record, body: str) -> bool:
+    """Apply a user's correction to a record. Returns True if a value was parsed."""
+    if rec.record_type == "mileage":
+        parsed = extract.parse_mileage_text(body)
+        if not parsed:
+            return False
+        rec.miles = parsed["miles"]
+        return True
+
+    amount = _parse_amount(body)
+    if amount is None:
+        return False
+    rec.amount = amount
+    return True
+
+
+_AMOUNT_RE = re.compile(r"£?\s*(\d+(?:\.\d{1,2})?)")
+
+
+def _parse_amount(body: str) -> float | None:
+    match = _AMOUNT_RE.search(body)
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value if 0 < value <= 100_000 else None

@@ -142,6 +142,16 @@ def latest_pending(db: Session, user_id: int) -> Record | None:
     )
 
 
+def latest_editing(db: Session, user_id: int) -> Record | None:
+    """The record the user is currently correcting (status 'editing'), if any."""
+    return (
+        db.query(Record)
+        .filter_by(user_id=user_id, confirmation_status="editing")
+        .order_by(Record.created_at.desc())
+        .first()
+    )
+
+
 def make_export_link(db: Session, user_id: int) -> str:
     token = secrets.token_urlsafe(24)
     db.add(ExportLink(token=token, user_id=user_id))
