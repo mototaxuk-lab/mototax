@@ -15,15 +15,24 @@ fallback only delivers inside the 24h window (or the Twilio sandbox).
 import datetime as dt
 
 import config
+import tax
 import twilio_client as wa
 from models import Record, SessionLocal, User, now
 
-REMINDER_BODY = (
-    "Quick weekly check-in 🔥\n"
-    "Send your delivery miles for this week.\n"
-    "Example: \"120 miles\"\n"
-    "Add earnings screenshots if you want your real take-home estimate."
-)
+
+def reminder_body(user: User) -> str:
+    """Per-user reminder text, naming the currently-active vehicle as a nudge to
+    switch before logging if they changed vehicle."""
+    vehicle = ""
+    if user.vehicle_type:
+        vehicle = f" — currently logging to {tax.emoji(user.vehicle_type)} {tax.label(user.vehicle_type)}"
+    return (
+        "Quick weekly check-in 🔥\n"
+        f"Send your delivery miles for this week{vehicle}.\n"
+        "(Type \"use bike\" first if you switched vehicle.)\n"
+        "Example: \"120 miles\"\n"
+        "Add earnings screenshots if you want your real take-home estimate."
+    )
 
 
 def due_users(db) -> list[User]:
@@ -55,9 +64,15 @@ def send_reminders() -> dict:
         for user in users:
             try:
                 if config.REMINDER_TEMPLATE_SID:
-                    wa.send_whatsapp_template(user.whatsapp_number, config.REMINDER_TEMPLATE_SID)
+                    # Approved templates own their copy; pass the active vehicle as
+                    # variable {{1}} so a template can include it if it wants to.
+                    wa.send_whatsapp_template(
+                        user.whatsapp_number,
+                        config.REMINDER_TEMPLATE_SID,
+                        {"1": f"{tax.emoji(user.vehicle_type)} {tax.label(user.vehicle_type)}"},
+                    )
                 else:
-                    wa.send_whatsapp(user.whatsapp_number, REMINDER_BODY)
+                    wa.send_whatsapp(user.whatsapp_number, reminder_body(user))
                 sent += 1
             except Exception as exc:  # one bad number shouldn't stop the batch
                 failed += 1

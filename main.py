@@ -28,7 +28,7 @@ import tax
 import twilio_client as wa
 from models import (
     ExportLink, Record, SessionLocal, User, get_or_create_user, init_db,
-    latest_editing, latest_pending, make_export_link, now,
+    latest_awaiting_vehicle, latest_editing, latest_pending, make_export_link, now,
 )
 
 app = FastAPI(title="Courier Tax & Records Assistant")
@@ -312,6 +312,27 @@ def _handle_text(db, user, number, body) -> None:
         )
         return
 
+    # If a mileage entry is waiting for a vehicle pick, this message is the choice.
+    awaiting = latest_awaiting_vehicle(db, user.id)
+    if awaiting:
+        options = _vehicle_options(db, user)
+        chosen = None
+        if low.isdigit():
+            i = int(low) - 1
+            if 0 <= i < len(options):
+                chosen = options[i]
+        else:
+            chosen = _parse_vehicle(low)
+        if chosen is None:
+            wa.send_whatsapp(number, "Please reply with the vehicle's number.\n\n"
+                             + _which_vehicle_prompt(options, tax.normalise_vehicle(user.vehicle_type)))
+            return
+        awaiting.vehicle_type = chosen
+        awaiting.confirmation_status = "pending"
+        db.commit()
+        wa.send_whatsapp(number, _mileage_prompt(awaiting.miles or 0, chosen, user))
+        return
+
     if low in ("settings", "setting"):
         user.onboarding_step = "ask_vehicle"
         db.commit()
@@ -402,16 +423,59 @@ def _handle_text(db, user, number, body) -> None:
             miles=mileage["miles"],
             vehicle_type=user.vehicle_type,
             source_type=mileage["source_hint"],
-            confirmation_status="pending",
             confidence=mileage["confidence"],
             notes=mileage["notes"],
         )
-        db.add(record)
-        db.commit()
-        wa.send_whatsapp(number, _mileage_prompt(mileage["miles"], user.vehicle_type, user))
+        # If the courier uses more than one vehicle, confirm which one before logging
+        # (defends against forgetting to switch). Single-vehicle users are unaffected.
+        if len(_logged_vehicle_types(db, user.id)) >= 2:
+            record.confirmation_status = "awaiting_vehicle"
+            db.add(record)
+            db.commit()
+            options = _vehicle_options(db, user)
+            wa.send_whatsapp(number, _which_vehicle_prompt(options, tax.normalise_vehicle(user.vehicle_type)))
+        else:
+            record.confirmation_status = "pending"
+            db.add(record)
+            db.commit()
+            wa.send_whatsapp(number, _mileage_prompt(mileage["miles"], user.vehicle_type, user))
         return
 
     wa.send_whatsapp(number, HELP)
+
+
+_VEHICLE_ORDER = ("car_van", "motorbike", "bicycle")
+
+
+def _logged_vehicle_types(db, user_id: int) -> set[str]:
+    """Distinct vehicle types the user has logged mileage against (non-rejected)."""
+    rows = (
+        db.query(Record.vehicle_type)
+        .filter(
+            Record.user_id == user_id,
+            Record.record_type == "mileage",
+            Record.confirmation_status != "rejected",
+            Record.vehicle_type.isnot(None),
+        )
+        .distinct()
+        .all()
+    )
+    return {tax.normalise_vehicle(v[0]) for v in rows}
+
+
+def _vehicle_options(db, user) -> list[str]:
+    """Vehicles to offer in the 'which vehicle?' prompt — active first."""
+    active = tax.normalise_vehicle(user.vehicle_type)
+    candidates = _logged_vehicle_types(db, user.id) | {active}
+    return [active] + [t for t in _VEHICLE_ORDER if t in candidates and t != active]
+
+
+def _which_vehicle_prompt(options: list[str], active: str) -> str:
+    lines = ["Which vehicle were these on?"]
+    for i, vt in enumerate(options, 1):
+        mark = " (current)" if vt == active else ""
+        lines.append(f" {i}. {tax.emoji(vt)} {tax.label(vt).capitalize()}{mark}")
+    return "\n".join(lines)
 
 
 # Shown after every detected/updated record so the user can correct it.

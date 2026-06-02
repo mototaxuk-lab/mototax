@@ -161,6 +161,16 @@ def latest_editing(db: Session, user_id: int) -> Record | None:
     )
 
 
+def latest_awaiting_vehicle(db: Session, user_id: int) -> Record | None:
+    """A mileage record waiting for the user to pick which vehicle it was on."""
+    return (
+        db.query(Record)
+        .filter_by(user_id=user_id, confirmation_status="awaiting_vehicle")
+        .order_by(Record.created_at.desc())
+        .first()
+    )
+
+
 def make_export_link(db: Session, user_id: int) -> str:
     token = secrets.token_urlsafe(24)
     db.add(ExportLink(token=token, user_id=user_id))
