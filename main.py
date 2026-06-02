@@ -82,6 +82,8 @@ SETUP_COMPLETE = (
 HELP = (
     "Send a receipt or earnings screenshot, or type your mileage like \"145 miles\".\n"
     "After I read something, reply 1 to confirm, 2 to edit, or 3 to delete.\n"
+    "Got more than one vehicle? Type \"use car\", \"use motorbike\" or \"use bike\" to switch, "
+    "or VEHICLES to see them.\n"
     "Type CSV for your export, SUMMARY for your totals, or SETTINGS to update your profile."
 )
 
@@ -93,7 +95,7 @@ def _parse_vehicle(text: str) -> str | None:
         return "car_van"
     if t in ("2",) or "motorbike" in t or "motorcycle" in t or "moped" in t:
         return "motorbike"
-    if t in ("3",) or "bicycle" in t or "cycle" in t or "e-bike" in t or "ebike" in t:
+    if t in ("3",) or "bicycle" in t or "cycle" in t or "e-bike" in t or "ebike" in t or "bike" in t:
         return "bicycle"
     return None
 
@@ -276,6 +278,7 @@ def _handle_media(db, user, number, params, num_media) -> None:
             category=data["category"],
             amount=data["amount"],
             miles=data["miles"],
+            vehicle_type=user.vehicle_type if data["record_type"] == "mileage" else None,
             source_type=source,
             confirmation_status="pending",
             confidence=data["confidence"],
@@ -313,6 +316,31 @@ def _handle_text(db, user, number, body) -> None:
         user.onboarding_step = "ask_vehicle"
         db.commit()
         wa.send_whatsapp(number, "Let's update your settings.\n\n" + VEHICLE_QUESTION)
+        return
+
+    if low in ("vehicles", "vehicle", "my vehicles"):
+        wa.send_whatsapp(number, export.vehicles_overview(db, user))
+        return
+
+    if low.startswith("use ") or low.startswith("switch to ") or low.startswith("switch "):
+        arg = low.split(" ", 1)[1] if " " in low else ""
+        arg = arg.removeprefix("to ").strip()
+        vehicle = _parse_vehicle(arg)
+        if vehicle is None:
+            wa.send_whatsapp(
+                number,
+                "I didn't recognise that vehicle. Try \"use car\", \"use motorbike\" or \"use bike\".",
+            )
+            return
+        switched = user.vehicle_type != vehicle
+        user.vehicle_type = vehicle
+        db.commit()
+        verb = "Switched to" if switched else "Already logging to"
+        wa.send_whatsapp(
+            number,
+            f"{verb} your {tax.label(vehicle)} {tax.emoji(vehicle)}\n"
+            f"Mileage you send now uses the {tax.label(vehicle)} rate.",
+        )
         return
 
     if low in ("1", "confirm", "yes", "y"):
@@ -372,6 +400,7 @@ def _handle_text(db, user, number, body) -> None:
             record_date=mileage["record_date"],
             category="mileage",
             miles=mileage["miles"],
+            vehicle_type=user.vehicle_type,
             source_type=mileage["source_hint"],
             confirmation_status="pending",
             confidence=mileage["confidence"],
@@ -379,7 +408,7 @@ def _handle_text(db, user, number, body) -> None:
         )
         db.add(record)
         db.commit()
-        wa.send_whatsapp(number, _mileage_prompt(mileage["miles"], user))
+        wa.send_whatsapp(number, _mileage_prompt(mileage["miles"], user.vehicle_type, user))
         return
 
     wa.send_whatsapp(number, HELP)
@@ -389,12 +418,13 @@ def _handle_text(db, user, number, body) -> None:
 _OPTIONS_FOOTER = "Reply 1 to confirm, 2 to edit, or 3 to delete."
 
 
-def _mileage_prompt(miles: float, user, updated: bool = False) -> str:
+def _mileage_prompt(miles: float, vehicle_type, user, updated: bool = False) -> str:
     """Confirmation text for a mileage entry, with deduction + tax-benefit estimate."""
-    deduction = tax.mileage_deduction(miles, user.vehicle_type)
+    deduction = tax.mileage_deduction(miles, vehicle_type)
     lead = "Updated to" if updated else "I logged"
     msg = (
-        f"{lead} {miles:.0f} delivery miles for this week.\n"
+        f"{lead} {miles:.0f} delivery miles ({tax.label(vehicle_type)} {tax.emoji(vehicle_type)}) "
+        f"for this week.\n"
         f"Estimated mileage deduction: £{deduction:.0f}"
     )
     if user.tax_rate:
@@ -407,7 +437,7 @@ def _mileage_prompt(miles: float, user, updated: bool = False) -> str:
 def _confirmation_prompt(data: dict, user) -> str:
     """First-time confirmation prompt built from a fresh extraction dict."""
     if data["record_type"] == "mileage":
-        return _mileage_prompt(data["miles"], user)
+        return _mileage_prompt(data["miles"], user.vehicle_type, user)
 
     amount = f"£{data['amount']:.2f}" if data["amount"] is not None else "£?"
     vendor = data["platform_or_vendor"] or data["category"]
@@ -424,7 +454,7 @@ def _confirmation_prompt(data: dict, user) -> str:
 def _record_prompt(rec: Record, user, updated: bool = False) -> str:
     """Re-prompt built from a stored record (used after an edit or cancel)."""
     if rec.record_type == "mileage":
-        return _mileage_prompt(rec.miles or 0, user, updated=updated)
+        return _mileage_prompt(rec.miles or 0, rec.vehicle_type or user.vehicle_type, user, updated=updated)
 
     amount = f"£{rec.amount:.2f}" if rec.amount is not None else "£?"
     vendor = rec.platform_or_vendor or rec.category

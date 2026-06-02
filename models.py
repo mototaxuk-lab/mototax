@@ -69,6 +69,9 @@ class Record(Base):
 
     amount: Mapped[float | None] = mapped_column(Float, nullable=True)  # GBP
     miles: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Vehicle this mileage entry was logged against (car_van | motorbike | bicycle).
+    # Stamped at log time so historical rates survive an active-vehicle switch.
+    vehicle_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # source_type: screenshot | receipt_photo | text_entry | odometer_photo | user_estimate
     source_type: Mapped[str] = mapped_column(String(24), default="")
@@ -100,25 +103,31 @@ def init_db() -> None:
     migration that works on both SQLite and Postgres).
     """
     Base.metadata.create_all(engine)
-    _ensure_user_columns()
+    _ensure_columns("users", _USER_ADDED_COLUMNS)
+    _ensure_columns("records", _RECORD_ADDED_COLUMNS)
 
+
+_FLOAT_SQL = "FLOAT" if engine.url.drivername.startswith("sqlite") else "DOUBLE PRECISION"
 
 # Columns added after the initial schema, with the SQL type used by ALTER TABLE.
 _USER_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",
-    "tax_rate": "DOUBLE PRECISION" if not engine.url.drivername.startswith("sqlite") else "FLOAT",
+    "tax_rate": _FLOAT_SQL,
     "onboarding_step": "VARCHAR(16) DEFAULT 'ask_vehicle'",
+}
+_RECORD_ADDED_COLUMNS = {
+    "vehicle_type": "VARCHAR(16)",
 }
 
 
-def _ensure_user_columns() -> None:
-    existing = {c["name"] for c in inspect(engine).get_columns("users")}
-    missing = {k: v for k, v in _USER_ADDED_COLUMNS.items() if k not in existing}
+def _ensure_columns(table: str, wanted: dict[str, str]) -> None:
+    existing = {c["name"] for c in inspect(engine).get_columns(table)}
+    missing = {k: v for k, v in wanted.items() if k not in existing}
     if not missing:
         return
     with engine.begin() as conn:
         for name, ddl in missing.items():
-            conn.execute(text(f"ALTER TABLE users ADD COLUMN {name} {ddl}"))
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
 
 
 def get_or_create_user(db: Session, whatsapp_number: str) -> tuple[User, bool]:
