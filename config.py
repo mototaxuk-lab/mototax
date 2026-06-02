@@ -37,3 +37,17 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./courier.db")
 
 # Below this confidence the user is warned to check the value carefully.
 CONFIDENCE_WARN_THRESHOLD = float(os.environ.get("CONFIDENCE_WARN_THRESHOLD", "0.6"))
+
+# --- Weekly reminder ---
+# In-process scheduler that nudges couriers to log their miles.
+REMINDERS_ENABLED = os.environ.get("REMINDERS_ENABLED", "true").lower() in ("1", "true", "yes")
+REMINDER_DAY = os.environ.get("REMINDER_DAY", "sun")              # APScheduler day_of_week
+REMINDER_HOUR_UTC = int(os.environ.get("REMINDER_HOUR_UTC", "18"))  # 18:00 UTC ≈ 7pm BST (Sunday evening)
+# Don't nudge users who already logged mileage within this many days.
+REMIND_SKIP_DAYS = int(os.environ.get("REMIND_SKIP_DAYS", "6"))
+# Approved WhatsApp template for business-initiated (outside-24h) sends. If empty,
+# we fall back to a freeform message, which only delivers inside the 24h service
+# window (or the Twilio sandbox). Real Sunday delivery needs an approved template.
+REMINDER_TEMPLATE_SID = os.environ.get("REMINDER_TEMPLATE_SID", "")
+# Secret that guards the manual POST /internal/run-reminders trigger.
+CRON_SECRET = os.environ.get("CRON_SECRET", "")

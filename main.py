@@ -17,9 +17,13 @@ import re
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 import config
 import export
 import extract
+import reminders
 import tax
 import twilio_client as wa
 from models import (
@@ -105,9 +109,30 @@ def _parse_tax_rate(text: str) -> float | None:
     return None
 
 
+_scheduler: BackgroundScheduler | None = None
+
+
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    global _scheduler
+    if config.REMINDERS_ENABLED and _scheduler is None:
+        _scheduler = BackgroundScheduler(timezone="UTC")
+        _scheduler.add_job(
+            reminders.send_reminders,
+            CronTrigger(
+                day_of_week=config.REMINDER_DAY,
+                hour=config.REMINDER_HOUR_UTC,
+                minute=0,
+                timezone="UTC",
+            ),
+            id="weekly_reminder",
+            misfire_grace_time=3600,
+            replace_existing=True,
+        )
+        _scheduler.start()
+        print(f"[startup] weekly reminder scheduled: {config.REMINDER_DAY} "
+              f"{config.REMINDER_HOUR_UTC:02d}:00 UTC")
 
 
 @app.get("/", response_class=PlainTextResponse)
@@ -132,6 +157,15 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     background_tasks.add_task(handle_inbound, params)
     # Empty TwiML tells Twilio "received, nothing to say inline".
     return Response(content="<Response></Response>", media_type="application/xml")
+
+
+@app.post("/internal/run-reminders")
+def run_reminders(request: Request):
+    """Manually fire the weekly reminder. Guarded by CRON_SECRET (?key=...)."""
+    key = request.query_params.get("key", "")
+    if not config.CRON_SECRET or key != config.CRON_SECRET:
+        return Response(status_code=403)
+    return reminders.send_reminders()
 
 
 @app.get("/export/{token}")

@@ -1,4 +1,6 @@
 """Twilio WhatsApp helpers: send messages, verify webhooks, download media."""
+import json
+
 import requests
 from twilio.rest import Client
 from twilio.request_validator import RequestValidator
@@ -21,6 +23,20 @@ def send_whatsapp(to: str, body: str) -> None:
         print(f"[twilio disabled] would send to {to}: {body}")
         return
     _client.messages.create(from_=config.TWILIO_WHATSAPP_FROM, to=to, body=body)
+
+
+def send_whatsapp_template(to: str, content_sid: str, variables: dict | None = None) -> None:
+    """Send an approved WhatsApp template (required for business-initiated messages
+    outside the 24-hour service window, e.g. the weekly reminder)."""
+    if not to.startswith("whatsapp:"):
+        to = "whatsapp:" + to
+    if _client is None:
+        print(f"[twilio disabled] would send template {content_sid} to {to}")
+        return
+    kwargs = {"from_": config.TWILIO_WHATSAPP_FROM, "to": to, "content_sid": content_sid}
+    if variables:
+        kwargs["content_variables"] = json.dumps(variables)
+    _client.messages.create(**kwargs)
 
 
 def verify_signature(signature: str, params: dict) -> bool:
