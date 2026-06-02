@@ -10,7 +10,7 @@ import datetime as dt
 import secrets
 
 from sqlalchemy import (
-    create_engine, String, Float, DateTime, ForeignKey, Integer
+    create_engine, inspect, text, String, Float, DateTime, ForeignKey, Integer
 )
 from sqlalchemy.orm import (
     DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker, Session
@@ -43,6 +43,14 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     whatsapp_number: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+
+    # Onboarding profile (set during the two-question WhatsApp onboarding).
+    # vehicle_type: car_van | motorbike | bicycle  (drives the mileage rate)
+    vehicle_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # tax_rate: 0.20 | 0.40 | 0.0  (used only for rough tax-benefit estimates)
+    tax_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # onboarding_step: ask_vehicle | ask_tax | done
+    onboarding_step: Mapped[str] = mapped_column(String(16), default="ask_vehicle")
 
     records: Mapped[list["Record"]] = relationship(back_populates="user")
 
@@ -85,8 +93,32 @@ class ExportLink(Base):
 
 
 def init_db() -> None:
-    """Create tables if they don't exist. Safe to call on every boot."""
+    """Create tables if they don't exist, then add any missing columns.
+
+    Safe to call on every boot. `create_all` only creates missing *tables*, so
+    we add new columns to the existing `users` table by hand (a lightweight
+    migration that works on both SQLite and Postgres).
+    """
     Base.metadata.create_all(engine)
+    _ensure_user_columns()
+
+
+# Columns added after the initial schema, with the SQL type used by ALTER TABLE.
+_USER_ADDED_COLUMNS = {
+    "vehicle_type": "VARCHAR(16)",
+    "tax_rate": "DOUBLE PRECISION" if not engine.url.drivername.startswith("sqlite") else "FLOAT",
+    "onboarding_step": "VARCHAR(16) DEFAULT 'ask_vehicle'",
+}
+
+
+def _ensure_user_columns() -> None:
+    existing = {c["name"] for c in inspect(engine).get_columns("users")}
+    missing = {k: v for k, v in _USER_ADDED_COLUMNS.items() if k not in existing}
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for name, ddl in missing.items():
+            conn.execute(text(f"ALTER TABLE users ADD COLUMN {name} {ddl}"))
 
 
 def get_or_create_user(db: Session, whatsapp_number: str) -> tuple[User, bool]:

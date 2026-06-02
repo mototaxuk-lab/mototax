@@ -9,6 +9,7 @@ import io
 
 from sqlalchemy.orm import Session
 
+import tax
 from models import Record, User
 
 CSV_COLUMNS = [
@@ -44,25 +45,29 @@ def build_csv(db: Session, user_id: int) -> str:
     return buf.getvalue()
 
 
-def weekly_summary(db: Session, user_id: int) -> str:
-    """A short text recap to send over WhatsApp (the 'tax-saved counter' hook)."""
-    rows = _exportable(db, user_id)
+def weekly_summary(db: Session, user: User) -> str:
+    """A short text recap to send over WhatsApp (the 'tax-saved counter' hook).
+
+    Uses the user's vehicle type for the mileage rate and their tax-estimate
+    level for the rough tax-benefit figure.
+    """
+    rows = _exportable(db, user.id)
     income = sum(r.amount or 0 for r in rows if r.record_type == "income")
     expenses = sum(r.amount or 0 for r in rows if r.record_type == "expense")
     miles = sum(r.miles or 0 for r in rows if r.record_type == "mileage")
 
-    # 2026/27 simplified mileage: 55p for the first 10,000 business miles, 25p after.
-    if miles <= 10_000:
-        mileage_deduction = miles * 0.55
-    else:
-        mileage_deduction = 10_000 * 0.55 + (miles - 10_000) * 0.25
-
-    taxable = max(0.0, income - expenses - mileage_deduction)
-    return (
-        f"Your records so far:\n"
-        f"• Income logged: £{income:,.2f}\n"
-        f"• Expenses logged: £{expenses:,.2f}\n"
-        f"• Business miles: {miles:,.0f}  (≈ £{mileage_deduction:,.2f} deduction)\n"
-        f"• Estimated taxable income: £{taxable:,.2f}\n\n"
-        f"Indicative only, based on what you've confirmed — not tax advice."
-    )
+    deduction = tax.mileage_deduction(miles, user.vehicle_type)
+    lines = [
+        "Your records so far:",
+        f"• Income logged: £{income:,.2f}",
+        f"• Expenses logged (for accountant review): £{expenses:,.2f}",
+        f"• Business miles: {miles:,.0f}  (≈ £{deduction:,.2f} mileage deduction)",
+    ]
+    if user.tax_rate:
+        benefit = tax.tax_benefit(deduction, user.tax_rate)
+        lines.append(
+            f"• Estimated tax benefit from mileage: up to ~£{benefit:,.2f} "
+            f"(at {user.tax_rate * 100:.0f}% tax rate)"
+        )
+    lines.append("\nIndicative only, based on what you've confirmed — not tax advice.")
+    return "\n".join(lines)

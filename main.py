@@ -19,29 +19,89 @@ from fastapi.responses import PlainTextResponse
 import config
 import export
 import extract
+import tax
 import twilio_client as wa
 from models import (
-    ExportLink, Record, SessionLocal, get_or_create_user, init_db,
+    ExportLink, Record, SessionLocal, User, get_or_create_user, init_db,
     latest_pending, make_export_link, now,
 )
 
 app = FastAPI(title="Courier Tax & Records Assistant")
 
 WELCOME = (
-    "👋 Welcome! I help UK couriers keep tax-ready records.\n\n"
-    "Just send me:\n"
-    "• an earnings screenshot (Uber Eats / Deliveroo / Just Eat)\n"
-    "• a photo of a fuel/repair/equipment receipt\n"
-    "• your weekly mileage (e.g. \"145 miles\")\n\n"
-    "I'll read it, you confirm, and I keep a clean log.\n"
-    "Type CSV any time for an accountant-ready export."
+    "Welcome 👋\n"
+    "I help delivery couriers keep simple records for tax time and understand "
+    "what they actually keep each week.\n\n"
+    "You can send me:\n"
+    "• your weekly delivery miles\n"
+    "• Uber Eats / Deliveroo / Just Eat earnings screenshots\n"
+    "• courier-related expenses, such as delivery bag, phone mount, parking or tolls\n\n"
+    "I'll organise these into weekly, monthly and annual record summaries that you "
+    "or your accountant can review.\n\n"
+    "Important:\n"
+    "• I currently use simplified mileage for vehicle-cost calculations.\n"
+    "• This means you track delivery miles instead of every petrol, insurance, "
+    "repair or servicing receipt.\n"
+    "• Actual vehicle-cost calculations are not currently available.\n"
+    "• I don't file your tax return or give formal tax advice.\n"
+    "• You can confirm, edit or delete records before they're included in your export.\n\n"
+    "To start, I just need two quick answers."
+)
+
+VEHICLE_QUESTION = (
+    "What do you mainly use for deliveries?\n"
+    "1. Car / van\n"
+    "2. Motorbike / moped\n"
+    "3. Bicycle / e-bike\n\n"
+    "Reply 1, 2 or 3. (This sets the mileage rate I use.)"
+)
+
+TAX_QUESTION = (
+    "For rough tax-benefit estimates, which tax rate should I use?\n"
+    "1. Basic — 20%  (income ~£12,571–£50,270). Choose this if unsure.\n"
+    "2. Higher — 40%  (income ~£50,271–£125,140).\n"
+    "3. Likely no income tax — 0%  (income below £12,570).\n\n"
+    "Reply 1, 2 or 3. This is only used for rough estimates — it's not tax advice."
+)
+
+SETUP_COMPLETE = (
+    "You're set up ✅\n\n"
+    "Every Sunday evening I'll remind you to send your delivery miles "
+    "(example: \"120 miles\").\n"
+    "Add earnings screenshots if you want your real take-home estimate.\n"
+    "Add courier-related expenses if you want them included in your record pack "
+    "for accountant review.\n\n"
+    "Type SETTINGS any time to change your vehicle type or tax estimate level."
 )
 
 HELP = (
     "Send a receipt or earnings screenshot, or type your mileage like \"145 miles\".\n"
     "After I read something, reply 1 to confirm or 2 to discard.\n"
-    "Type CSV for your export, or SUMMARY for your totals so far."
+    "Type CSV for your export, SUMMARY for your totals, or SETTINGS to update your profile."
 )
+
+# --- Onboarding answer parsing -------------------------------------------------
+
+def _parse_vehicle(text: str) -> str | None:
+    t = text.strip().lower()
+    if t in ("1",) or "car" in t or "van" in t:
+        return "car_van"
+    if t in ("2",) or "motorbike" in t or "motorcycle" in t or "moped" in t:
+        return "motorbike"
+    if t in ("3",) or "bicycle" in t or "cycle" in t or "e-bike" in t or "ebike" in t:
+        return "bicycle"
+    return None
+
+
+def _parse_tax_rate(text: str) -> float | None:
+    t = text.strip().lower().rstrip("%")
+    if t in ("1", "20", "basic"):
+        return 0.20
+    if t in ("2", "40", "higher"):
+        return 0.40
+    if t in ("3", "0", "none"):
+        return 0.0
+    return None
 
 
 @app.on_event("startup")
@@ -109,20 +169,52 @@ def handle_inbound(params: dict) -> None:
 
         user, created = get_or_create_user(db, number)
         if created:
+            # Brand-new user: explain the service, then ask the first question.
             wa.send_whatsapp(number, WELCOME)
-
-        if num_media > 0:
-            _handle_media(db, user.id, number, params, num_media)
+            wa.send_whatsapp(number, VEHICLE_QUESTION)
             return
 
-        _handle_text(db, user.id, number, body)
+        # Until onboarding is finished, every message is an onboarding answer.
+        if user.onboarding_step != "done":
+            _handle_onboarding(db, user, number, body)
+            return
+
+        if num_media > 0:
+            _handle_media(db, user, number, params, num_media)
+            return
+
+        _handle_text(db, user, number, body)
     except Exception as exc:  # never let a background task die silently
         print(f"[handle_inbound] error: {exc!r}")
     finally:
         db.close()
 
 
-def _handle_media(db, user_id, number, params, num_media) -> None:
+def _handle_onboarding(db, user, number, body) -> None:
+    if user.onboarding_step == "ask_vehicle":
+        vehicle = _parse_vehicle(body)
+        if vehicle is None:
+            wa.send_whatsapp(number, "Sorry, I didn't catch that.\n\n" + VEHICLE_QUESTION)
+            return
+        user.vehicle_type = vehicle
+        user.onboarding_step = "ask_tax"
+        db.commit()
+        wa.send_whatsapp(number, TAX_QUESTION)
+        return
+
+    if user.onboarding_step == "ask_tax":
+        rate = _parse_tax_rate(body)
+        if rate is None:
+            wa.send_whatsapp(number, "Sorry, I didn't catch that.\n\n" + TAX_QUESTION)
+            return
+        user.tax_rate = rate
+        user.onboarding_step = "done"
+        db.commit()
+        wa.send_whatsapp(number, SETUP_COMPLETE)
+        return
+
+
+def _handle_media(db, user, number, params, num_media) -> None:
     for i in range(num_media):
         url = params.get(f"MediaUrl{i}", "")
         ctype = params.get(f"MediaContentType{i}", "image/jpeg")
@@ -142,7 +234,7 @@ def _handle_media(db, user_id, number, params, num_media) -> None:
             source = "odometer_photo"
 
         record = Record(
-            user_id=user_id,
+            user_id=user.id,
             record_type=data["record_type"],
             record_date=data["record_date"],
             platform_or_vendor=data["platform_or_vendor"],
@@ -157,14 +249,20 @@ def _handle_media(db, user_id, number, params, num_media) -> None:
         )
         db.add(record)
         db.commit()
-        wa.send_whatsapp(number, _confirmation_prompt(data))
+        wa.send_whatsapp(number, _confirmation_prompt(data, user))
 
 
-def _handle_text(db, user_id, number, body) -> None:
+def _handle_text(db, user, number, body) -> None:
     low = body.lower()
 
+    if low in ("settings", "setting"):
+        user.onboarding_step = "ask_vehicle"
+        db.commit()
+        wa.send_whatsapp(number, "Let's update your settings.\n\n" + VEHICLE_QUESTION)
+        return
+
     if low in ("1", "confirm", "yes", "y"):
-        rec = latest_pending(db, user_id)
+        rec = latest_pending(db, user.id)
         if not rec:
             wa.send_whatsapp(number, "Nothing waiting to confirm. Send a photo or your mileage.")
             return
@@ -174,16 +272,16 @@ def _handle_text(db, user_id, number, body) -> None:
         wa.send_whatsapp(number, "✅ Saved.")
         return
 
-    if low in ("2", "edit", "no", "n"):
-        rec = latest_pending(db, user_id)
+    if low in ("2", "delete", "discard", "no", "n"):
+        rec = latest_pending(db, user.id)
         if rec:
             rec.confirmation_status = "rejected"
             db.commit()
-        wa.send_whatsapp(number, "Discarded. Send it again or type the correct value.")
+        wa.send_whatsapp(number, "Deleted. Send it again or type the correct value.")
         return
 
     if low in ("csv", "export", "report"):
-        token = make_export_link(db, user_id)
+        token = make_export_link(db, user.id)
         if config.PUBLIC_BASE_URL:
             wa.send_whatsapp(number, f"Your CSV (link valid 24h):\n{config.PUBLIC_BASE_URL}/export/{token}")
         else:
@@ -191,7 +289,7 @@ def _handle_text(db, user_id, number, body) -> None:
         return
 
     if low in ("summary", "total", "totals"):
-        wa.send_whatsapp(number, export.weekly_summary(db, user_id))
+        wa.send_whatsapp(number, export.weekly_summary(db, user))
         return
 
     if low in ("help", "hi", "hello", "start", "menu"):
@@ -202,7 +300,7 @@ def _handle_text(db, user_id, number, body) -> None:
     mileage = extract.parse_mileage_text(body)
     if mileage:
         record = Record(
-            user_id=user_id,
+            user_id=user.id,
             record_type="mileage",
             record_date=mileage["record_date"],
             category="mileage",
@@ -214,23 +312,33 @@ def _handle_text(db, user_id, number, body) -> None:
         )
         db.add(record)
         db.commit()
-        wa.send_whatsapp(
-            number,
-            f"Logged {mileage['miles']:.0f} business miles (user-entered).\n"
-            f"Reply 1 to confirm or 2 to discard.",
-        )
+        wa.send_whatsapp(number, _mileage_prompt(mileage["miles"], user))
         return
 
     wa.send_whatsapp(number, HELP)
 
 
-def _confirmation_prompt(data: dict) -> str:
+def _mileage_prompt(miles: float, user) -> str:
+    """Confirmation text for a mileage entry, with deduction + tax-benefit estimate."""
+    deduction = tax.mileage_deduction(miles, user.vehicle_type)
+    msg = (
+        f"I logged {miles:.0f} delivery miles for this week.\n"
+        f"Estimated mileage deduction: £{deduction:.0f}"
+    )
+    if user.tax_rate:
+        benefit = tax.tax_benefit(deduction, user.tax_rate)
+        msg += f"\nEstimated tax benefit: up to ~£{benefit:.0f} (at {user.tax_rate * 100:.0f}% tax rate)"
+    msg += "\n\nReply 1 to confirm or 2 to delete."
+    return msg
+
+
+def _confirmation_prompt(data: dict, user) -> str:
     if data["record_type"] == "mileage":
-        detail = f"{data['miles']:.0f} miles"
-    else:
-        amount = f"£{data['amount']:.2f}" if data["amount"] is not None else "£?"
-        vendor = data["platform_or_vendor"] or data["category"]
-        detail = f"{vendor}, {amount}, {data['category']}"
+        return _mileage_prompt(data["miles"], user)
+
+    amount = f"£{data['amount']:.2f}" if data["amount"] is not None else "£?"
+    vendor = data["platform_or_vendor"] or data["category"]
+    detail = f"{vendor}, {amount}, {data['category']}"
 
     msg = f"Detected: {detail} (dated {data['record_date']}).\nReply 1 to confirm, 2 to discard."
     if data["confidence"] < config.CONFIDENCE_WARN_THRESHOLD:
