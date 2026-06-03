@@ -7,7 +7,7 @@ bot's replies are printed here. Uses an isolated local SQLite DB so it never
 touches production data.
 
 Run:
-    python chat.py                # fresh conversation (wipes local_chat.db each run? no — persists)
+    python chat.py                # continue in local_chat.db (state persists between runs)
     python chat.py --fresh        # start from a clean DB
     python chat.py --number +447700900123   # pretend to be a specific number
 
