@@ -34,49 +34,119 @@ from models import (
 app = FastAPI(title="Courier Tax & Records Assistant")
 
 WELCOME = (
-    "Welcome 👋\n"
-    "I help delivery couriers keep simple records for tax time and understand "
-    "what they actually keep each week.\n\n"
-    "You can send me:\n"
-    "• your weekly delivery miles\n"
-    "• Uber Eats / Deliveroo / Just Eat earnings screenshots\n"
-    "• courier-related expenses, such as delivery bag, phone mount, parking or tolls\n\n"
-    "I'll organise these into weekly, monthly and annual record summaries that you "
-    "or your accountant can review.\n\n"
-    "Important:\n"
-    "• I currently use simplified mileage for vehicle-cost calculations.\n"
-    "• This means you track delivery miles instead of every petrol, insurance, "
-    "repair or servicing receipt.\n"
-    "• Actual vehicle-cost calculations are not currently available.\n"
-    "• I don't file your tax return or give formal tax advice.\n"
-    "• You can confirm, edit or delete records before they're included in your export.\n\n"
-    "To start, I just need two quick answers."
+    "Welcome 👋\n\n"
+    "Doing deliveries is busy enough — your tax records shouldn't become another job.\n\n"
+    "I help you keep your delivery records simple, week by week, directly in WhatsApp.\n\n"
+    "Send your miles, earnings screenshots or typed earnings, and courier expenses as "
+    "you go. I'll organise them into clear summaries so you can see what you actually "
+    "kept — and have cleaner records when tax time comes."
+)
+
+BOUNDARY = (
+    "For vehicle costs, I currently use simplified mileage.\n\n"
+    "That means you track delivery miles instead of every petrol, insurance, repair "
+    "or servicing receipt.\n\n"
+    "I don't file your tax return or give formal tax advice. Your records can be "
+    "reviewed by you or your accountant before filing."
+)
+
+TRUST = (
+    "You stay in control.\n\n"
+    "Before anything is added to your records, you can confirm, edit or delete it.\n\n"
+    "To set you up, I only need two quick answers."
 )
 
 VEHICLE_QUESTION = (
-    "What do you mainly use for deliveries?\n"
+    "Q1. What do you mainly use for deliveries?\n\n"
     "1. Car / van\n"
     "2. Motorbike / moped\n"
     "3. Bicycle / e-bike\n\n"
-    "Reply 1, 2 or 3. (This sets the mileage rate I use.)"
+    "Reply 1, 2 or 3. You can add another vehicle later."
 )
 
+_VEHICLE_LABELS = {
+    "car_van": "Car / van",
+    "motorbike": "Motorbike / moped",
+    "bicycle": "Bicycle / e-bike",
+}
+
+
+def vehicle_confirmation(vehicle: str) -> str:
+    return (
+        f"Got it — I'll use {_VEHICLE_LABELS[vehicle]} as your main delivery vehicle.\n\n"
+        "You can change this or add another vehicle later in settings."
+    )
+
+
 TAX_QUESTION = (
-    "For rough tax-benefit estimates, which tax rate should I use?\n"
-    "1. Basic — 20%  (income ~£12,571–£50,270). Choose this if unsure.\n"
-    "2. Higher — 40%  (income ~£50,271–£125,140).\n"
-    "3. Likely no income tax — 0%  (income below £12,570).\n\n"
-    "Reply 1, 2 or 3. This is only used for rough estimates — it's not tax advice."
+    "Q2. For rough tax-benefit estimates, which tax rate should I use?\n\n"
+    "1. Basic estimate — 20%\n"
+    "   Usually total annual income around £12,571–£50,270. Choose this if unsure.\n\n"
+    "2. Higher estimate — 40%\n"
+    "   Usually total annual income around £50,271–£125,140.\n\n"
+    "3. Likely no income tax — 0%\n"
+    "   Usually total annual income below £12,570.\n\n"
+    "Reply 1, 2 or 3.\n\n"
+    "This is only used for rough estimates. It is not tax advice. Your final tax "
+    "position depends on your total income and personal circumstances."
 )
+
+_TAX_LABELS = {
+    0.20: "Basic estimate — 20%",
+    0.40: "Higher estimate — 40%",
+    0.0: "Likely no income tax — 0%",
+}
+
+
+def tax_confirmation(rate: float) -> str:
+    return (
+        f"Got it — I'll use {_TAX_LABELS[rate]} for rough tax-benefit estimates.\n\n"
+        "You can change this later in settings."
+    )
+
 
 SETUP_COMPLETE = (
     "You're set up ✅\n\n"
-    "Every Sunday evening I'll remind you to send your delivery miles "
-    "(example: \"120 miles\").\n"
-    "Add earnings screenshots if you want your real take-home estimate.\n"
-    "Add courier-related expenses if you want them included in your record pack "
-    "for accountant review.\n\n"
-    "Type SETTINGS any time to change your vehicle type or tax estimate level."
+    "Every Sunday evening, I'll remind you to send your delivery miles.\n\n"
+    "Example:\n"
+    "\"120 miles\"\n\n"
+    "Add earnings screenshots or type your earnings if you want your real take-home "
+    "estimate.\n\n"
+    "Add courier-related expenses if you want them included in your record pack for "
+    "accountant review.\n\n"
+    "You can type SETTINGS anytime to change your vehicle type, tax estimate level or "
+    "reminder settings."
+)
+
+FREE_TRIAL = (
+    "Your first month is free.\n\n"
+    "After that, it's £5/month to keep weekly tracking, monthly exports and annual "
+    "records."
+)
+
+FIRST_ACTION = (
+    "Ready when you are.\n\n"
+    "You can start by sending this week's delivery miles.\n\n"
+    "Example:\n"
+    "\"120 miles\""
+)
+
+WHAT_IS_THIS = (
+    "I help delivery couriers organise delivery-work records in WhatsApp.\n\n"
+    "You can send:\n"
+    "• delivery miles\n"
+    "• earnings screenshots or typed earnings\n"
+    "• courier-related expenses\n\n"
+    "I organise them into weekly, monthly and annual summaries.\n\n"
+    "I use simplified mileage for vehicle costs, and I don't file tax returns or give "
+    "formal tax advice."
+)
+
+SKIP_REPLY = (
+    "No problem.\n\n"
+    "To use mileage calculations, I'll need your main vehicle type and tax estimate "
+    "level first.\n\n"
+    "Type START when you're ready."
 )
 
 HELP = (
@@ -205,9 +275,26 @@ def handle_inbound(params: dict) -> None:
         num_media = int(params.get("NumMedia", "0") or "0")
 
         user, created = get_or_create_user(db, number)
+
+        # Testing helper: wipe this user's data and restart onboarding from scratch.
+        if (params.get("Body") or "").strip().lower() == "restart":
+            db.query(Record).filter(Record.user_id == user.id).delete()
+            db.query(ExportLink).filter(ExportLink.user_id == user.id).delete()
+            db.delete(user)
+            db.commit()
+            user, _ = get_or_create_user(db, number)
+            wa.send_whatsapp(number, "🔄 Restarted. Starting from scratch.\n")
+            wa.send_whatsapp(number, WELCOME)
+            wa.send_whatsapp(number, BOUNDARY)
+            wa.send_whatsapp(number, TRUST)
+            wa.send_whatsapp(number, VEHICLE_QUESTION)
+            return
+
         if created:
             # Brand-new user: explain the service, then ask the first question.
             wa.send_whatsapp(number, WELCOME)
+            wa.send_whatsapp(number, BOUNDARY)
+            wa.send_whatsapp(number, TRUST)
             wa.send_whatsapp(number, VEHICLE_QUESTION)
             return
 
@@ -228,6 +315,20 @@ def handle_inbound(params: dict) -> None:
 
 
 def _handle_onboarding(db, user, number, body) -> None:
+    low = body.strip().lower()
+
+    if low in ("what is this?", "what is this", "how does this work?", "how does this work"):
+        wa.send_whatsapp(number, WHAT_IS_THIS)
+        return
+
+    if low in ("skip", "i'll do this later", "ill do this later", "later"):
+        wa.send_whatsapp(number, SKIP_REPLY)
+        return
+
+    if low in ("start", "hi", "hello") and user.onboarding_step == "ask_vehicle":
+        wa.send_whatsapp(number, VEHICLE_QUESTION)
+        return
+
     if user.onboarding_step == "ask_vehicle":
         vehicle = _parse_vehicle(body)
         if vehicle is None:
@@ -236,6 +337,7 @@ def _handle_onboarding(db, user, number, body) -> None:
         user.vehicle_type = vehicle
         user.onboarding_step = "ask_tax"
         db.commit()
+        wa.send_whatsapp(number, vehicle_confirmation(vehicle))
         wa.send_whatsapp(number, TAX_QUESTION)
         return
 
@@ -247,7 +349,10 @@ def _handle_onboarding(db, user, number, body) -> None:
         user.tax_rate = rate
         user.onboarding_step = "done"
         db.commit()
+        wa.send_whatsapp(number, tax_confirmation(rate))
         wa.send_whatsapp(number, SETUP_COMPLETE)
+        wa.send_whatsapp(number, FREE_TRIAL)
+        wa.send_whatsapp(number, FIRST_ACTION)
         return
 
 
