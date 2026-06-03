@@ -68,7 +68,7 @@ def weekly_summary(db: Session, user: User) -> str:
 
     by_vehicle = _miles_by_vehicle(rows, user.vehicle_type)
     total_miles = sum(by_vehicle.values())
-    deduction = sum(tax.mileage_deduction(m, vt) for vt, m in by_vehicle.items())
+    deduction = sum(tax.mileage_deduction(vt, m) for vt, m in by_vehicle.items())
 
     lines = [
         "Your records so far:",
@@ -82,7 +82,7 @@ def weekly_summary(db: Session, user: User) -> str:
         for vt, m in sorted(used.items(), key=lambda x: -x[1]):
             lines.append(
                 f"    – {tax.emoji(vt)} {tax.label(vt)}: {m:,.0f} mi "
-                f"(£{tax.mileage_deduction(m, vt):,.2f})"
+                f"(£{tax.mileage_deduction(vt, m):,.2f})"
             )
     if user.tax_rate:
         benefit = tax.tax_benefit(deduction, user.tax_rate)
@@ -90,6 +90,8 @@ def weekly_summary(db: Session, user: User) -> str:
             f"• Estimated tax benefit from mileage: up to ~£{benefit:,.2f} "
             f"(at {user.tax_rate * 100:.0f}% tax rate)"
         )
+    if total_miles > 0:
+        lines.append("\n" + tax.rate_line(user.vehicle_type))
     lines.append("\nIndicative only, based on what you've confirmed — not tax advice.")
     return "\n".join(lines)
 
@@ -102,7 +104,7 @@ def vehicles_overview(db: Session, user: User) -> str:
 
     lines = ["Your vehicles:"]
     for vt, miles in sorted(by_vehicle.items(), key=lambda x: -x[1]):
-        deduction = tax.mileage_deduction(miles, vt)
+        deduction = tax.mileage_deduction(vt, miles)
         mark = "  ← current" if vt == current else ""
         lines.append(
             f"• {tax.emoji(vt)} {tax.label(vt).capitalize()} — "

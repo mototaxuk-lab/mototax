@@ -30,7 +30,9 @@ self-reported estimate.
 | `extract.py` | Claude vision extraction + local mileage text parsing |
 | `models.py` | Postgres/SQLite models and helpers |
 | `twilio_client.py` | Send messages, verify webhook signatures, download media |
-| `export.py` | CSV builder + weekly summary (with the 2026/27 55p mileage rate) |
+| `export.py` | CSV builder + weekly summary |
+| `rates.py` | Single source of truth for simplified-mileage rates (see the unconfirmed-rate TODO inside) |
+| `tax.py` | Vehicle labels/emoji + tax-benefit helper (rate maths live in `rates.py`) |
 | `config.py` | Reads all secrets from environment variables |
 
 ## Run locally
