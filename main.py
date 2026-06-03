@@ -290,6 +290,37 @@ def handle_inbound(params: dict) -> None:
             wa.send_whatsapp(number, VEHICLE_QUESTION)
             return
 
+        # Testing helper: bail out of any in-progress step (a pending record, an
+        # edit, or a "which vehicle?" prompt) back to a clean idle state, without
+        # deleting confirmed history. Works from any state — unlike CANCEL, which
+        # only works mid-edit. (RESTART wipes everything; EXIT just clears the
+        # current interaction.)
+        if (params.get("Body") or "").strip().lower() in ("exit", "quit", "end"):
+            cleared = (
+                db.query(Record)
+                .filter(
+                    Record.user_id == user.id,
+                    Record.confirmation_status.in_(
+                        ("pending", "editing", "awaiting_vehicle")
+                    ),
+                )
+                .update({Record.confirmation_status: "rejected"}, synchronize_session=False)
+            )
+            db.commit()
+            if user.onboarding_step != "done":
+                wa.send_whatsapp(
+                    number,
+                    "👋 Exited. You're still mid-setup — type RESTART to begin again.",
+                )
+            else:
+                note = f" Cleared {cleared} pending item(s)." if cleared else ""
+                wa.send_whatsapp(
+                    number,
+                    f"👋 Exited the current conversation.{note}\n"
+                    "Send your miles, a photo, or HELP to start again.",
+                )
+            return
+
         if created:
             # Brand-new user: explain the service, then ask the first question.
             wa.send_whatsapp(number, WELCOME)
