@@ -93,7 +93,7 @@ def _send_image(number: str, path: str) -> None:
 def _reset_user(number: str) -> None:
     db = SessionLocal()
     try:
-        u = db.query(User).filter(User.number == number).first()
+        u = db.query(User).filter(User.whatsapp_number == number).first()
         if u:
             db.delete(u)  # records cascade if FK set; otherwise harmless for a demo DB
             db.commit()
@@ -120,7 +120,19 @@ def main_loop() -> None:
     print(f"  mototax local chat — you are {number}")
     print("  type a message and press enter.  /help for commands, 'quit' to exit.")
     print("=" * 60)
-    print("  (send anything to begin — a brand-new number triggers onboarding)")
+
+    # Greet on conversation start: a brand-new number gets the welcome +
+    # onboarding automatically, exactly like messaging the WhatsApp number for
+    # the first time. An existing session resumes quietly (state is preserved).
+    db = SessionLocal()
+    try:
+        existing = db.query(User).filter(User.whatsapp_number == number).first()
+    finally:
+        db.close()
+    if existing is None:
+        main.handle_inbound({"From": f"whatsapp:{number}", "Body": "", "NumMedia": "0"})
+    else:
+        print(f"  (resuming session for {number} — type a message, or /reset to start over)")
 
     while True:
         try:
