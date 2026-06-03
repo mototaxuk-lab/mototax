@@ -17,7 +17,10 @@ In the chat:
     /reset               delete the current user and start onboarding again
     /whoami              show the current phone number
     /help                show these commands
-    /quit  (or Ctrl-D)   exit
+    quit / exit / /q     leave the harness, back to the terminal (or Ctrl-D)
+
+Note: "quit"/"exit" close the harness. To test the bot's own in-conversation
+exit keyword, type "end" — that passes through to the bot.
 """
 import os
 import sys
@@ -115,7 +118,7 @@ def main_loop() -> None:
 
     print("=" * 60)
     print(f"  mototax local chat — you are {number}")
-    print("  type a message and press enter.  /help for commands, /quit to exit.")
+    print("  type a message and press enter.  /help for commands, 'quit' to exit.")
     print("=" * 60)
     print("  (send anything to begin — a brand-new number triggers onboarding)")
 
@@ -128,7 +131,7 @@ def main_loop() -> None:
 
         if not line:
             continue
-        if line in ("/quit", "/exit", "/q"):
+        if line.lower() in ("quit", "exit", "/quit", "/exit", "/q"):
             print("bye 👋")
             return
         if line == "/help":
