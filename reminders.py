@@ -55,12 +55,21 @@ def reminder_body(user: User) -> str:
     )
 
 
+_WEEKDAY_ABBR = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
 def due_users(db) -> list[User]:
-    """Onboarded users who haven't logged mileage within REMIND_SKIP_DAYS."""
+    """Onboarded users due a reminder today: reminders active, scheduled for today's
+    weekday, and no mileage logged within REMIND_SKIP_DAYS."""
     cutoff = now() - dt.timedelta(days=config.REMIND_SKIP_DAYS)
+    today = _WEEKDAY_ABBR[dt.date.today().weekday()]
     users = db.query(User).filter(User.onboarding_step == "done").all()
     due = []
     for user in users:
+        if (getattr(user, "reminder_status", "active") or "active") == "off":
+            continue
+        if (getattr(user, "reminder_day", "sun") or "sun") != today:
+            continue
         logged_recently = (
             db.query(Record)
             .filter(

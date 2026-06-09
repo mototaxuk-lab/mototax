@@ -68,6 +68,10 @@ class User(Base):
     # Terms & Privacy acceptance recorded during onboarding (Flow A).
     terms_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
     terms_accepted_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # Reminder schedule (Flow H). reminder_day: mon..sun; status: active|off.
+    reminder_day: Mapped[str] = mapped_column(String(3), default="sun")
+    reminder_time_label: Mapped[str] = mapped_column(String(8), default="evening")
+    reminder_status: Mapped[str] = mapped_column(String(8), default="active")
 
     records: Mapped[list["Record"]] = relationship(back_populates="user")
 
@@ -147,6 +151,9 @@ _USER_ADDED_COLUMNS = {
     "log_frequency": "VARCHAR(8) DEFAULT 'weekly'",
     "terms_version": "VARCHAR(16)",
     "terms_accepted_at": "TIMESTAMP",
+    "reminder_day": "VARCHAR(3) DEFAULT 'sun'",
+    "reminder_time_label": "VARCHAR(8) DEFAULT 'evening'",
+    "reminder_status": "VARCHAR(8) DEFAULT 'active'",
 }
 _RECORD_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",

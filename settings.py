@@ -101,6 +101,7 @@ def _vehicle_settings_overview(user) -> str:
     return (
         "Vehicle settings\n\n"
         f"Main vehicle: {tax.label(user.vehicle_type)}\n"
+        f"Default vehicle: {tax.label(default_vehicle(user))}\n"
         f"Other vehicles: {other}\n\n"
         "What do you want to do?\n\n"
         + _numbered([
@@ -134,10 +135,20 @@ _MAIN_MENU = (
         "Vehicle settings",
         "Tax estimate level",
         "Reminder settings",
-        "Subscription / payment",
+        "Account status",
         "Export or delete my data",
+        "Help",
     ])
 )
+
+# Reminder day options (Flow H §8): label -> (day_abbrev, time_label).
+_REMINDER_OPTIONS = [
+    ("Sunday evening", "sun", "evening"),
+    ("Monday morning", "mon", "morning"),
+    ("Friday evening", "fri", "evening"),
+]
+_DAY_NAMES = {"mon": "Monday", "tue": "Tuesday", "wed": "Wednesday",
+              "thu": "Thursday", "fri": "Friday", "sat": "Saturday", "sun": "Sunday"}
 
 _TAX_MENU = (
     "Which tax rate should I use for rough tax-benefit estimates?\n\n"
@@ -215,25 +226,84 @@ def _h_menu(db, user, number, low, payload):
         _go(user, "reminder")
         db.commit()
         wa.send_whatsapp(number, _reminder_menu(user))
-    elif choice in ("4", "subscription / payment", "subscription", "payment"):
+    elif choice in ("4", "account status", "account"):
+        rem = ("off" if user.reminder_status == "off"
+               else f"{_DAY_NAMES.get(user.reminder_day, 'Sunday')} {user.reminder_time_label}")
         wa.send_whatsapp(
             number,
-            "Your first month is free, then £5/month.\n\nBilling management is "
-            "coming soon.\n\nType MENU to go back, or DONE to close settings.",
-        )
-    elif choice in ("5", "export or delete my data", "export", "delete"):
-        token = make_export_link(db, user.id)
-        if config.PUBLIC_BASE_URL:
-            wa.send_whatsapp(number, f"Your CSV (link valid 24h):\n"
-                             f"{config.PUBLIC_BASE_URL}/export/{token}\n\n"
-                             "To request data deletion, reply DELETE MY DATA.")
-        else:
-            wa.send_whatsapp(number, "Export link isn't configured yet "
-                             "(set PUBLIC_BASE_URL).")
+            "Account status:\n\n"
+            "Plan: Free trial\n"
+            "Trial status: Active\n"
+            "Standard export: Excel record pack\n"
+            f"Reminder: {rem}\n\n"
+            "Your first month is free. After that, it's £5/month.\n\n"
+            "Type MENU to go back, or DONE to close settings.")
+    elif choice in ("5", "export or delete my data", "export", "delete", "data"):
+        _go(user, "data")
+        db.commit()
+        wa.send_whatsapp(number, "What would you like to do?\n\n"
+                         + _numbered(["Download my records", "Delete my data", "Back"]))
+    elif choice in ("6", "help", "what can you do", "what can you do?"):
+        wa.send_whatsapp(number, _HELP_MESSAGE)
         _go(user, None)
         db.commit()
     else:
         wa.send_whatsapp(number, "Please reply with an option number.\n\n" + _MAIN_MENU)
+
+
+_HELP_MESSAGE = (
+    "You can send me:\n\n"
+    "• delivery miles, e.g. \"120 miles\"\n"
+    "• earnings, e.g. \"Uber Eats £320\"\n"
+    "• earnings screenshots\n"
+    "• courier expenses, e.g. \"Delivery bag £45\"\n"
+    "• receipts for temporary OCR\n\n"
+    "I organise confirmed records into summaries and Excel record packs for "
+    "accountant review.\n\n"
+    "Type SUMMARY, EXPORT, or SETTINGS anytime."
+)
+
+
+def _h_data(db, user, number, low, payload):
+    if low in ("1", "download my records", "download", "export"):
+        token = make_export_link(db, user.id, fmt="xlsx")
+        if config.PUBLIC_BASE_URL:
+            wa.send_whatsapp(number, "Your Excel record pack (link valid 24h):\n"
+                             f"{config.PUBLIC_BASE_URL}/export/{token}")
+        else:
+            wa.send_whatsapp(number, "Export link isn't configured yet "
+                             "(set PUBLIC_BASE_URL).")
+        _back_to_menu(db, user, number)
+    elif low in ("2", "delete my data", "delete"):
+        _go(user, "delete_confirm")
+        db.commit()
+        wa.send_whatsapp(
+            number,
+            "Delete your stored records?\n\n"
+            "This will remove your confirmed records and settings from the service.\n\n"
+            "This cannot be undone.\n\n"
+            + _numbered(["Confirm delete", "Cancel"]))
+    elif low in ("3", "back", "cancel"):
+        _back_to_menu(db, user, number)
+    else:
+        wa.send_whatsapp(number, "Please reply 1, 2 or 3.")
+
+
+def _h_delete_confirm(db, user, number, low, payload):
+    if low in ("1", "confirm delete", "confirm", "yes"):
+        from models import Record, ExportLink
+        db.query(Record).filter(Record.user_id == user.id).delete()
+        db.query(ExportLink).filter(ExportLink.user_id == user.id).delete()
+        user.reminder_status = "off"
+        _go(user, None)
+        db.commit()
+        wa.send_whatsapp(
+            number,
+            "Your data deletion request has been received.\n\n"
+            "Your records will be deleted according to our data deletion process.")
+    else:
+        wa.send_whatsapp(number, "No change made — your records are safe.")
+        _back_to_menu(db, user, number)
 
 
 def _h_tax(db, user, number, low, payload):
@@ -252,33 +322,62 @@ def _h_tax(db, user, number, low, payload):
 
 
 def _reminder_menu(user) -> str:
-    current = (getattr(user, "log_frequency", "weekly") or "weekly").capitalize()
+    if user.reminder_status == "off":
+        current = "off"
+    else:
+        current = f"{_DAY_NAMES.get(user.reminder_day, 'Sunday')} {user.reminder_time_label}"
+    log_opt = ("Switch to monthly logging"
+               if (getattr(user, "log_frequency", "weekly") or "weekly") == "weekly"
+               else "Switch to weekly logging")
+    opts = [lbl for lbl, _, _ in _REMINDER_OPTIONS] + \
+        ["Turn reminders off", log_opt, "Back"]
     return (
-        "Logging frequency\n\n"
-        f"Currently: {current}\n\n"
-        "How often do you want to log your miles and earnings?\n\n"
-        + _numbered(["Weekly (recommended)", "Monthly", "Back"])
-        + "\n\nReminders are sent every Sunday evening for now."
+        f"Current reminder: {current}\n\n"
+        "When should I remind you to send your delivery miles?\n\n"
+        + _numbered(opts)
     )
 
 
 def _h_reminder(db, user, number, low, payload):
-    if low in ("1", "weekly", "weekly (recommended)"):
-        user.log_frequency = "weekly"
+    # 1-3 = day options, 4 = off, 5 = toggle logging frequency, 6 = back.
+    if low.isdigit() and 1 <= int(low) <= len(_REMINDER_OPTIONS):
+        label, day, tlabel = _REMINDER_OPTIONS[int(low) - 1]
+        user.reminder_day, user.reminder_time_label = day, tlabel
+        user.reminder_status = "active"
         _go(user, None)
         db.commit()
-        wa.send_whatsapp(number, "Updated ✅ I'll treat new entries as weekly by "
-                         "default. You can still say \"this month\" any time.")
-    elif low in ("2", "monthly"):
-        user.log_frequency = "monthly"
+        wa.send_whatsapp(number, f"Reminder updated ✅\n\nI'll remind you every "
+                         f"{label} to send your delivery miles.")
+    elif low in ("4", "turn reminders off", "off", "stop"):
+        _go(user, "reminder_off")
+        db.commit()
+        wa.send_whatsapp(number, "Turn off reminders?\n\nYou can still send mileage, "
+                         "earnings and expenses anytime.\n\n"
+                         + _numbered(["Confirm", "Cancel"]))
+    elif low == "5":
+        new = "monthly" if (user.log_frequency or "weekly") == "weekly" else "weekly"
+        user.log_frequency = new
         _go(user, None)
         db.commit()
-        wa.send_whatsapp(number, "Updated ✅ I'll treat new entries as monthly by "
-                         "default. You can still say \"this week\" any time.")
-    elif low in ("3", "back", "cancel"):
+        wa.send_whatsapp(number, f"Updated ✅ I'll treat new entries as {new} by "
+                         "default. You can still say \"this week\"/\"this month\" any time.")
+    elif low in ("6", "back", "cancel"):
         _back_to_menu(db, user, number)
     else:
-        wa.send_whatsapp(number, "Please reply 1, 2 or 3.\n\n" + _reminder_menu(user))
+        wa.send_whatsapp(number, "Please reply with an option number.\n\n"
+                         + _reminder_menu(user))
+
+
+def _h_reminder_off(db, user, number, low, payload):
+    if low in ("1", "confirm", "yes"):
+        user.reminder_status = "off"
+        _go(user, None)
+        db.commit()
+        wa.send_whatsapp(number, "Reminders turned off ✅\n\nYou can turn them back "
+                         "on anytime in settings.")
+    else:
+        wa.send_whatsapp(number, "Kept your reminders on.")
+        _back_to_menu(db, user, number)
 
 
 def _h_vehicle(db, user, number, low, payload):
@@ -534,6 +633,9 @@ _STATES = {
     "menu": _h_menu,
     "tax": _h_tax,
     "reminder": _h_reminder,
+    "reminder_off": _h_reminder_off,
+    "data": _h_data,
+    "delete_confirm": _h_delete_confirm,
     "vehicle": _h_vehicle,
     "add": _h_add,
     "added": _h_added,
@@ -553,6 +655,34 @@ _STATES = {
 def _nl_intent(db, user, number, low) -> bool:
     """Detect vehicle-settings intents in free text. Never changes data directly —
     routes to the relevant buttoned step. Returns True if matched."""
+    # Reminder intents (Flow H §13): "stop reminders", "remind me monday".
+    if ("reminder" in low or "remind" in low) and \
+            ("stop" in low or "off" in low or "turn off" in low or "disable" in low):
+        _go(user, "reminder_off")
+        db.commit()
+        wa.send_whatsapp(number, "Turn off reminders?\n\nYou can still send mileage, "
+                         "earnings and expenses anytime.\n\n"
+                         + _numbered(["Confirm", "Cancel"]))
+        return True
+    if "remind" in low:
+        for label, day, _ in _REMINDER_OPTIONS:
+            if day in low or _DAY_NAMES[day].lower() in low:
+                _go(user, "reminder")
+                db.commit()
+                wa.send_whatsapp(number, _reminder_menu(user))
+                return True
+
+    # Data intents (Flow H §13): "delete my data", "download my records".
+    if "delete" in low and ("data" in low or "record" in low or "account" in low):
+        _go(user, "delete_confirm")
+        db.commit()
+        wa.send_whatsapp(
+            number,
+            "Delete your stored records?\n\nThis will remove your confirmed records "
+            "and settings from the service.\n\nThis cannot be undone.\n\n"
+            + _numbered(["Confirm delete", "Cancel"]))
+        return True
+
     # "I use two cars" — same type, no new setting needed.
     if ("two car" in low or "2 car" in low or "two van" in low
             or "second car" in low):
