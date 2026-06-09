@@ -242,11 +242,24 @@ SKIP_REPLY = (
 )
 
 HELP = (
-    "Send a receipt or earnings screenshot, or type your mileage like \"145 miles\".\n"
-    "After I read something, reply 1 to confirm, 2 to edit, or 3 to delete.\n"
-    "Got more than one vehicle? Type \"use car\", \"use motorbike\" or \"use bike\" to switch, "
-    "or VEHICLES to see them.\n"
-    "Type EXPORT for your Excel record pack, SUMMARY for your totals, or SETTINGS to update your profile."
+    "I can help you keep delivery-work records in WhatsApp.\n\n"
+    "You can send:\n\n"
+    "• Mileage — \"120 miles\"\n"
+    "• Earnings — an Uber Eats / Deliveroo / Just Eat screenshot, or \"Uber Eats £320\"\n"
+    "• Expenses — \"Delivery bag £45\"\n"
+    "• Summary — type SUMMARY to see this week's records\n"
+    "• Export — type EXPORT to create your record pack\n"
+    "• Settings — type SETTINGS to update your profile\n\n"
+    "What would you like to do?"
+)
+
+UNKNOWN = (
+    "I'm not sure how to log that yet.\n\n"
+    "You can send records like this:\n\n"
+    "• \"120 miles\"\n"
+    "• \"Uber Eats £320\"\n"
+    "• \"Delivery bag £45\"\n\n"
+    "What would you like to add? (Type HELP for more.)"
 )
 
 # --- Onboarding answer parsing -------------------------------------------------
@@ -999,6 +1012,64 @@ def _handle_text(db, user, number, body) -> None:
         )
         return
 
+    # Flow J §11: human / support request.
+    if low in ("human", "agent", "support", "talk to someone", "talk to a human",
+               "speak to someone", "contact support"):
+        wa.send_whatsapp(
+            number,
+            "Support is limited while we're testing the service.\n\n"
+            "You can describe the issue here and we'll review it if support is "
+            "available.\n\n"
+            "For tax advice or filing questions, please speak to an accountant.")
+        return
+
+    # Flow J §9: "is this tax advice?" / "will this file my tax?"
+    if ("tax advice" in low or "file my tax" in low or "do my tax" in low
+            or "is this tax" in low):
+        wa.send_whatsapp(
+            number,
+            "No — this service doesn't file your tax return or give formal tax "
+            "advice.\n\n"
+            "It helps you organise your delivery-work records. You or your accountant "
+            "should review the records before filing.")
+        return
+
+    # Flow J §10: unsupported personal-tax questions.
+    if ("self assessment" in low or "self-assessment" in low or "tax return" in low
+            or ("claim" in low and ("rent" in low or "home" in low or "mortgage" in low
+                                    or "council tax" in low))):
+        wa.send_whatsapp(
+            number,
+            "I can't give formal tax advice or complete your tax return.\n\n"
+            "I can help organise your delivery-work records — mileage, earnings and "
+            "courier-related expenses.\n\n"
+            "For personal tax questions, please check with an accountant or HMRC "
+            "guidance.")
+        return
+
+    # Flow J §6/§7: petrol/vehicle-cost questions + simplified-mileage explanation.
+    if ("simplified mileage" in low or
+            (("petrol" in low or "fuel" in low or "insurance" in low or "repair" in low
+              or "servicing" in low or "mot" in low or "road tax" in low or "tyre" in low)
+             and ("?" in body or "can i" in low or "upload" in low or "add" in low
+                  or "what about" in low or "claim" in low))):
+        wa.send_whatsapp(
+            number,
+            "For vehicle costs, this service currently uses simplified mileage.\n\n"
+            "That means you track delivery miles instead of petrol, insurance, repair "
+            "or servicing receipts — so I don't collect vehicle running-cost receipts "
+            "as expense records.\n\n"
+            "You can log your delivery miles instead, for example:\n\n\"120 miles\"")
+        return
+
+    # Flow J §12: several different items in one message (mileage + earnings +
+    # expense). Only triggers when ≥2 distinct types are present; otherwise the
+    # normal split-mileage / multi-earnings handlers below take over.
+    multi = _detect_multi(body)
+    if multi:
+        _handle_multi(db, user, number, multi)
+        return
+
     # Try to read it as a mileage entry. Handles single / split / monthly /
     # personal+delivery / vehicle-tagged inputs (see extract.parse_mileage_text).
     # Period: an explicit "month"/"week" in the message wins; otherwise use the
@@ -1036,7 +1107,7 @@ def _handle_text(db, user, number, body) -> None:
         _handle_earnings_entry(db, user, number, earnings)
         return
 
-    # Sounds like mileage but no number we could read (Flow B section 11).
+    # Sounds like mileage but no number we could read (Flow B §15 / Flow J §3).
     if any(w in low for w in ("mile", "drove", "drive", "driving", "rode", "cycled")):
         wa.send_whatsapp(
             number,
@@ -1046,7 +1117,86 @@ def _handle_text(db, user, number, body) -> None:
         )
         return
 
-    wa.send_whatsapp(number, HELP)
+    # Mentions earnings but no amount we could read (Flow J §4).
+    if (extract._find_platform(body)
+            or any(w in low for w in ("earn", "earned", "earning", "made", "took",
+                                      "income", "wage"))):
+        wa.send_whatsapp(
+            number,
+            "To log earnings, please send either:\n\n"
+            "• an earnings screenshot, or\n"
+            "• a message like \"Uber Eats £320\"\n\n"
+            "Which would you like to do?")
+        return
+
+    # Unknown message (Flow J §2): guide, don't judge.
+    wa.send_whatsapp(number, UNKNOWN)
+
+
+def _detect_multi(body: str):
+    """Flow J §12: split a message into items of different types. Returns a list of
+    (kind, data) only when ≥2 distinct types are present, else None."""
+    parts = [p for p in re.split(r"\s*,\s*", body.strip()) if p.strip()]
+    if len(parts) < 2:
+        return None
+    items = []
+    for p in parts:
+        m = extract.parse_mileage_text(p)
+        if m and m["kind"] == "single" and not m.get("too_high"):
+            items.append(("mileage", m))
+            continue
+        ex = extract.parse_expense_text(p)
+        if ex and not ex["amount_missing"]:
+            items.append(("expense", ex["entries"][0]))
+            continue
+        en = extract.parse_earnings_text(p)
+        if en and not en["platform_missing"]:
+            items.append(("earnings", en["entries"][0]))
+            continue
+        return None  # an unparseable segment — fall back to single-item handling
+    if len({k for k, _ in items}) < 2:
+        return None
+    return items
+
+
+def _handle_multi(db, user, number, items) -> None:
+    """Create a pending record for each parsed item and list them for confirmation."""
+    monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
+    ps, pe = _period_range(monthly)
+    pf = dict(period_start=ps.isoformat(), period_end=pe.isoformat(),
+              entry_frequency="monthly" if monthly else "weekly")
+    lines = ["I found multiple items:\n"]
+    for kind, data in items:
+        if kind == "mileage":
+            vt = data.get("vehicle_hint") or vehicle_settings.default_vehicle(user)
+            db.add(Record(user_id=user.id, record_type="mileage",
+                          record_date=extract._today(), category="mileage",
+                          miles=data["miles"], vehicle_type=vt,
+                          source_type=data["source_hint"], confidence=1.0,
+                          confirmation_status="pending", notes="Multi-item entry.", **pf))
+            lines.append(f"• Mileage: {data['miles']:.0f} miles")
+        elif kind == "earnings":
+            db.add(Record(user_id=user.id, record_type="income",
+                          record_date=extract._today(), category="platform_income",
+                          platform_or_vendor=(data["platform"] or "")[:64],
+                          amount=data["amount"], source_type="manual_entry",
+                          confidence=1.0, confirmation_status="pending",
+                          notes="Multi-item entry.", **pf))
+            lines.append(f"• Earnings: {data['platform']} £{data['amount']:.2f}")
+        else:  # expense
+            reason = _expense_review_reason(data["description"], data["category"])
+            db.add(Record(user_id=user.id, record_type="expense",
+                          record_date=extract._today(), category=data["category"],
+                          platform_or_vendor=data["description"][:64],
+                          amount=data["amount"], source_type="manual_entry",
+                          confidence=1.0,
+                          confirmation_status="pending_review" if reason else "pending",
+                          notes=(reason[1] if reason else "Multi-item entry."), **pf))
+            flag = "  (review-only)" if reason else ""
+            lines.append(f"• Expense: {data['description']} £{data['amount']:.2f}{flag}")
+    db.commit()
+    lines.append(f"\n{_OPTIONS_FOOTER}")
+    wa.send_whatsapp(number, "\n".join(lines))
 
 
 def _handle_mileage_entry(db, user, number, parsed: dict) -> None:
