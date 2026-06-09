@@ -229,3 +229,87 @@ def parse_mileage_text(body: str) -> dict | None:
     rec["too_high"] = miles > _HIGH_WEEKLY_MILES and not monthly
     rec["personal_excluded"] = None
     return rec
+
+
+# --- Manual earnings parsing (Flow D) ----------------------------------------
+
+# Delivery platforms and their common spellings. "Uber" maps to Uber Eats since
+# couriers rarely mean Uber rides here. Order matters: match longer names first.
+_PLATFORMS = [
+    ("Uber Eats", ("uber eats", "ubereats", "uber")),
+    ("Deliveroo", ("deliveroo", "roo")),
+    ("Just Eat", ("just eat", "justeat", "just-eat", "just-eats")),
+    ("Amazon Flex", ("amazon flex", "amazon", "flex")),
+    ("Stuart", ("stuart",)),
+]
+
+# Words that signal a message is about earnings even with no platform named.
+_EARN_KEYWORDS = ("earn", "earning", "made", "took", "income", "wage", "wages", "pay", "payout")
+
+_AMOUNT_GBP_RE = re.compile(r"£\s*(\d+(?:\.\d{1,2})?)")
+_AMOUNT_ANY_RE = re.compile(r"(\d+(?:\.\d{1,2})?)")
+
+
+def _find_platform(text: str) -> str | None:
+    t = text.lower()
+    for name, aliases in _PLATFORMS:
+        if any(a in t for a in aliases):
+            return name
+    return None
+
+
+def _find_amount(text: str, require_symbol: bool) -> float | None:
+    m = _AMOUNT_GBP_RE.search(text)
+    if m:
+        return float(m.group(1))
+    if require_symbol:
+        return None
+    m = _AMOUNT_ANY_RE.search(text)
+    return float(m.group(1)) if m else None
+
+
+def parse_earnings_text(body: str) -> dict | None:
+    """Rules-based manual earnings parse (Flow D). Handles:
+
+    "Uber Eats £320"                  -> single
+    "Uber Eats £320, Deliveroo £200"  -> multi
+    "£320 this week"                  -> single, platform missing
+
+    Returns a dict with "entries" [{platform, amount}], "kind", "monthly" and
+    "platform_missing" — or None if the text isn't an earnings entry.
+    """
+    low = body.lower()
+    monthly = "month" in low
+    has_keyword = any(k in low for k in _EARN_KEYWORDS)
+
+    parts = re.split(r"\s*(?:,|;|\band\b|\+|/)\s*", body.strip())
+    entries: list[dict] = []
+    for part in parts:
+        if not part.strip():
+            continue
+        plat = _find_platform(part)
+        amount = _find_amount(part, require_symbol=(plat is None and not has_keyword))
+        if amount is None or amount <= 0 or amount > 1_000_000:
+            continue
+        entries.append({"platform": plat, "amount": amount})
+
+    if not entries:
+        return None
+
+    has_platform = any(e["platform"] for e in entries)
+    has_symbol = "£" in body
+    # Only treat as earnings if there's a platform, a £ sign, or an earnings word —
+    # otherwise a bare number is mileage, not income.
+    if not (has_platform or has_symbol or has_keyword):
+        return None
+
+    # For multi-entry, keep only the segments that actually name a platform.
+    if len(entries) > 1 and has_platform:
+        entries = [e for e in entries if e["platform"]]
+
+    return {
+        "kind": "multi" if len(entries) > 1 else "single",
+        "entries": entries,
+        "monthly": monthly,
+        "platform_missing": len(entries) == 1 and entries[0]["platform"] is None,
+    }

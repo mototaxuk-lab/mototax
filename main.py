@@ -29,8 +29,12 @@ import tax
 import twilio_client as wa
 from models import (
     ExportLink, Record, SessionLocal, User, get_or_create_user, init_db,
-    latest_awaiting_vehicle, latest_editing, latest_pending, make_export_link, now,
+    latest_awaiting_platform, latest_awaiting_vehicle, latest_editing,
+    latest_pending, make_export_link, now,
 )
+
+# The three delivery platforms offered as quick picks when one is unclear.
+_PLATFORM_CHOICES = ["Uber Eats", "Deliveroo", "Just Eat"]
 
 app = FastAPI(title="Courier Tax & Records Assistant")
 
@@ -376,6 +380,15 @@ def _handle_media(db, user, number, params, num_media) -> None:
         if data["record_type"] == "mileage":
             source = "odometer_photo"
 
+        # Flow D: income with an unreadable amount or platform routes to a fix-up
+        # step before confirmation, so AI output is never silently saved.
+        status = "pending"
+        if data["record_type"] == "income":
+            if data["amount"] is None:
+                status = "editing"
+            elif not data["platform_or_vendor"]:
+                status = "awaiting_platform"
+
         record = Record(
             user_id=user.id,
             record_type=data["record_type"],
@@ -386,14 +399,23 @@ def _handle_media(db, user, number, params, num_media) -> None:
             miles=data["miles"],
             vehicle_type=user.vehicle_type if data["record_type"] == "mileage" else None,
             source_type=source,
-            confirmation_status="pending",
+            confirmation_status=status,
             confidence=data["confidence"],
             original_media_url=url,
             notes=data["notes"],
         )
         db.add(record)
         db.commit()
-        wa.send_whatsapp(number, _confirmation_prompt(data, user))
+
+        if status == "editing":  # amount unclear (Flow D §5)
+            wa.send_whatsapp(number, "I couldn't read the earnings amount clearly.\n\n"
+                             "Please type the amount, for example:\n\n\"Uber Eats £320\"")
+        elif status == "awaiting_platform":  # platform unclear (Flow D §4)
+            wa.send_whatsapp(number, _platform_picker(
+                "I can read the earnings amount, but I'm not sure which platform this "
+                "is from.\n\nWhich platform is this?"))
+        else:
+            wa.send_whatsapp(number, _confirmation_prompt(data, user))
 
 
 def _handle_text(db, user, number, body) -> None:
@@ -449,6 +471,28 @@ def _handle_text(db, user, number, body) -> None:
             wa.send_whatsapp(number, _mileage_prompt(awaiting.miles or 0, chosen, user))
             return
 
+    # If an income entry is waiting for its platform (Flow D), this is the answer.
+    awaiting_plat = latest_awaiting_platform(db, user.id)
+    if awaiting_plat:
+        if low in ("cancel", "stop", "delete", "3"):
+            awaiting_plat.confirmation_status = "rejected"
+            db.commit()
+            wa.send_whatsapp(number, "Deleted.\n\nNo earnings record or screenshot was saved.")
+            return
+        platform = None
+        if low.isdigit() and 1 <= int(low) <= len(_PLATFORM_CHOICES):
+            platform = _PLATFORM_CHOICES[int(low) - 1]
+        elif low in ("4", "other"):
+            wa.send_whatsapp(number, "Please type the platform name.")
+            return
+        else:
+            platform = extract._find_platform(body) or body.strip().title()
+        awaiting_plat.platform_or_vendor = platform[:64]
+        awaiting_plat.confirmation_status = "pending"
+        db.commit()
+        wa.send_whatsapp(number, _income_prompt(awaiting_plat, user))
+        return
+
     # Flow C: vehicle/settings menu, in-flow states, and NL vehicle intents.
     # Checked after editing/awaiting (Flow B drafts win) but before the confirm
     # shortcuts so menu number replies aren't read as confirm/edit/delete.
@@ -480,17 +524,30 @@ def _handle_text(db, user, number, body) -> None:
         )
         return
 
-    if low in ("1", "confirm", "yes", "y"):
+    # "4" / "evidence" — confirm a screenshot earnings record AND keep the image.
+    keep_evidence = low in ("4", "evidence", "save screenshot as evidence", "save evidence")
+
+    if low in ("1", "confirm", "yes", "y", "confirm all") or keep_evidence:
         pending = _all_pending(db, user.id)
         if not pending:
             wa.send_whatsapp(number, "Nothing waiting to confirm. Send a photo or your mileage.")
             return
         has_mileage = any(r.record_type == "mileage" for r in pending)
+        has_income = any(r.record_type == "income" for r in pending)
         for rec in pending:
             rec.confirmation_status = "estimated" if rec.source_type == "user_estimate" else "confirmed"
             rec.confirmed_at = now()
+            # Privacy default (Flow D §16): don't retain the raw screenshot unless
+            # the user explicitly chose to save it as evidence.
+            if rec.record_type == "income" and not keep_evidence:
+                rec.original_media_url = ""
         db.commit()
-        if has_mileage:
+        if has_income:
+            if keep_evidence:
+                wa.send_whatsapp(number, "Screenshot saved as evidence ✅\n\n"
+                                 "You can delete saved evidence later from your records.")
+            wa.send_whatsapp(number, export.earnings_summary(db, user))
+        elif has_mileage:
             wa.send_whatsapp(
                 number,
                 "Confirmed ✅\n\n"
@@ -559,6 +616,12 @@ def _handle_text(db, user, number, body) -> None:
     mileage = extract.parse_mileage_text(body)
     if mileage:
         _handle_mileage_entry(db, user, number, mileage)
+        return
+
+    # Try to read it as manual earnings (Flow D): "Uber Eats £320" etc.
+    earnings = extract.parse_earnings_text(body)
+    if earnings:
+        _handle_earnings_entry(db, user, number, earnings)
         return
 
     # Sounds like mileage but no number we could read (Flow B section 11).
@@ -652,6 +715,103 @@ def _split_prompt(rows: list[tuple[str, float]], user) -> str:
     return "\n".join(lines)
 
 
+# --- Flow D: manual earnings -------------------------------------------------
+
+def _platform_picker(lead: str) -> str:
+    return (lead + "\n\n"
+            + "\n".join(f"{i}. {p}" for i, p in enumerate(_PLATFORM_CHOICES, 1))
+            + f"\n{len(_PLATFORM_CHOICES) + 1}. Other")
+
+
+def _recent_income_duplicate(db, user_id, platform, amount) -> Record | None:
+    """A confirmed income record this week with the same platform and amount."""
+    week_ago = (dt.date.today() - dt.timedelta(days=7)).isoformat()
+    return (
+        db.query(Record)
+        .filter(
+            Record.user_id == user_id,
+            Record.record_type == "income",
+            Record.confirmation_status.in_(["confirmed", "estimated"]),
+            Record.platform_or_vendor == platform,
+            Record.amount == amount,
+            Record.record_date >= week_ago,
+        )
+        .first()
+    )
+
+
+def _handle_earnings_entry(db, user, number, parsed: dict) -> None:
+    """Create pending income record(s) from manual text and prompt to confirm."""
+    period = "this month" if parsed.get("monthly") else "this week"
+    entries = parsed["entries"]
+
+    # Platform missing on a single amount → ask which platform first (Flow D §11/14).
+    if parsed["platform_missing"]:
+        e = entries[0]
+        rec = Record(
+            user_id=user.id, record_type="income", record_date=extract._today(),
+            category="platform_income", amount=e["amount"], source_type="manual_entry",
+            confidence=1.0, confirmation_status="awaiting_platform",
+            notes="Manual earnings entry.",
+        )
+        db.add(rec)
+        db.commit()
+        wa.send_whatsapp(number, _platform_picker(
+            f"I can log £{e['amount']:.2f} for {period}, but I need the platform.\n\n"
+            "Which platform was this from?"))
+        return
+
+    # Multiple platforms in one message (Flow D §10/13).
+    if parsed["kind"] == "multi":
+        for e in entries:
+            db.add(Record(
+                user_id=user.id, record_type="income", record_date=extract._today(),
+                category="platform_income", platform_or_vendor=(e["platform"] or "")[:64],
+                amount=e["amount"], source_type="manual_entry", confidence=1.0,
+                confirmation_status="pending", notes="Manual earnings entry.",
+            ))
+        db.commit()
+        lines = ["I logged:\n"]
+        total = 0.0
+        for e in entries:
+            total += e["amount"]
+            lines.append(f"{e['platform']}: £{e['amount']:.2f}")
+        lines.append(f"\nTotal earnings: £{total:.2f}")
+        lines.append(f"Period: {period}")
+        lines.append(f"\nConfirm?\n{_OPTIONS_FOOTER}")
+        wa.send_whatsapp(number, "\n".join(lines))
+        return
+
+    # Single platform + amount.
+    e = entries[0]
+    rec = Record(
+        user_id=user.id, record_type="income", record_date=extract._today(),
+        category="platform_income", platform_or_vendor=(e["platform"] or "")[:64],
+        amount=e["amount"], source_type="manual_entry", confidence=1.0,
+        confirmation_status="pending", notes="Manual earnings entry.",
+    )
+    db.add(rec)
+    db.commit()
+
+    dup = _recent_income_duplicate(db, user.id, rec.platform_or_vendor, rec.amount)
+    prompt = _income_prompt(rec, user, period=period)
+    if dup:
+        prompt = ("This looks similar to an earnings record already added for this "
+                  "week.\n\nDo you want to add it again or ignore it?\n\n" + prompt)
+    wa.send_whatsapp(number, prompt)
+
+
+def _income_prompt(rec: Record, user, period: str = "this week") -> str:
+    """Confirmation text for a single income record (Flow D §12)."""
+    return (
+        "I logged:\n\n"
+        f"Platform: {rec.platform_or_vendor or '—'}\n"
+        f"Earnings: £{rec.amount:.2f}\n"
+        f"Period: {period}\n\n"
+        f"Confirm?\n{_OPTIONS_FOOTER}"
+    )
+
+
 _VEHICLE_ORDER = ("car_van", "motorbike", "bicycle")
 
 
@@ -736,6 +896,25 @@ def _confirmation_prompt(data: dict, user) -> str:
     if data["record_type"] == "mileage":
         return _mileage_prompt(data["miles"], user.vehicle_type, user)
 
+    # Earnings screenshot (Flow D §3): confirmed record saved, not the screenshot.
+    if data["record_type"] == "income":
+        period = data["record_date"] or "this week"
+        msg = (
+            "I detected:\n\n"
+            f"Platform: {data['platform_or_vendor'] or '—'}\n"
+            f"Period: {period}\n"
+            f"Earnings: £{data['amount']:.2f}\n\n"
+            "By default, I'll save the confirmed earnings record, not the screenshot "
+            "itself.\n\n"
+            "Do you want to confirm this?\n"
+            f"{_OPTIONS_FOOTER}\n"
+            "Reply 4 to also save the screenshot as evidence."
+        )
+        if data["confidence"] < config.CONFIDENCE_WARN_THRESHOLD:
+            msg += "\n⚠️ I'm not fully sure on this one — please double-check the figures."
+        return msg
+
+    # Expense receipt.
     amount = f"£{data['amount']:.2f}" if data["amount"] is not None else "£?"
     vendor = data["platform_or_vendor"] or data["category"]
     detail = f"{vendor}, {amount}, {data['category']}"

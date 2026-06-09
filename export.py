@@ -94,6 +94,29 @@ def weekly_summary(db: Session, user: User) -> str:
     return "\n".join(lines)
 
 
+def earnings_summary(db: Session, user: User) -> str:
+    """Flow D summary after confirming earnings: this-week totals per platform."""
+    import datetime as dt
+    week_ago = (dt.date.today() - dt.timedelta(days=7)).isoformat()
+    rows = [
+        r for r in _exportable(db, user.id)
+        if r.record_type == "income" and (r.record_date or "") >= week_ago
+    ]
+    by_platform: dict[str, float] = {}
+    for r in rows:
+        name = r.platform_or_vendor or "Other"
+        by_platform[name] = by_platform.get(name, 0.0) + (r.amount or 0.0)
+
+    lines = ["Earnings added ✅\n", "This week so far:"]
+    for name, amt in sorted(by_platform.items(), key=lambda x: -x[1]):
+        lines.append(f"{name}: £{amt:,.2f}")
+    total = sum(by_platform.values())
+    lines.append(f"\nTotal earnings logged: £{total:,.2f}")
+    lines.append("\nAdd mileage if you want your mileage deduction and estimated "
+                 "real take-home.")
+    return "\n".join(lines)
+
+
 def vehicles_overview(db: Session, user: User) -> str:
     """The 'vehicles' command: a per-vehicle tab of miles and deduction."""
     by_vehicle = _miles_by_vehicle(_exportable(db, user.id), user.vehicle_type)
