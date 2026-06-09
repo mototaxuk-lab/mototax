@@ -81,7 +81,16 @@ def _review_warning(kind: str, description: str, amount: float | None) -> str:
             f"{line}")
     return f"{head}\n{_REVIEW_FOOTER}"
 
-app = FastAPI(title="Courier Tax & Records Assistant")
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _lifespan(app):
+    _ensure_started()
+    yield
+
+
+app = FastAPI(title="Courier Tax & Records Assistant", lifespan=_lifespan)
 
 WELCOME = (
     "Welcome 👋\n\n"
@@ -287,12 +296,17 @@ def _parse_tax_rate(text: str) -> float | None:
 
 
 _scheduler: BackgroundScheduler | None = None
+_started = False
 
 
-@app.on_event("startup")
-def _startup() -> None:
+def _ensure_started() -> None:
+    """Create/migrate tables and start the scheduler. Idempotent, and called both
+    at app startup and lazily before handling a message, so the schema is always
+    ready regardless of how the app is launched."""
+    global _started, _scheduler
+    if _started:
+        return
     init_db()
-    global _scheduler
     if config.REMINDERS_ENABLED and _scheduler is None:
         _scheduler = BackgroundScheduler(timezone="UTC")
         # Fire daily; send_reminders() picks the users whose reminder_day is today
@@ -306,6 +320,7 @@ def _startup() -> None:
         )
         _scheduler.start()
         print(f"[startup] daily reminder check at {config.REMINDER_HOUR_UTC:02d}:00 UTC")
+    _started = True
 
 
 @app.get("/", response_class=PlainTextResponse)
@@ -377,6 +392,8 @@ def export_csv(token: str):
 # --------------------------------------------------------------------------
 
 def handle_inbound(params: dict) -> None:
+    _ensure_started()  # make sure tables/columns exist no matter how we were launched
+    number = ""
     db = SessionLocal()
     try:
         from_field = params.get("From", "")            # "whatsapp:+447700900000"
@@ -444,7 +461,16 @@ def handle_inbound(params: dict) -> None:
 
         _handle_text(db, user, number, body)
     except Exception as exc:  # never let a background task die silently
+        import traceback
         print(f"[handle_inbound] error: {exc!r}")
+        traceback.print_exc()
+        db.rollback()
+        if number:
+            try:
+                wa.send_whatsapp(number, "Sorry, something went wrong on my side. "
+                                 "Please try that again in a moment.")
+            except Exception:
+                pass
     finally:
         db.close()
 
