@@ -22,20 +22,22 @@ deployed on Railway.
   sources. If 45p is correct, every deduction shown is overstated by ~22%. A parked
   `rate-config-refactor` branch centralises rates and adds a `RATE_CONFIRMED` gate but
   has not been merged. **Do not launch on the unverified value.**
-- **Period on new entries** still defaults to the current week/month. A period picker now
-  exists in the mileage **edit** menu (preset weeks/months + custom range); offering it at
-  log time for other record types is still open.
-- **Twilio trial cap.** Onboarding now sends many messages (Terms/Privacy gate + setup);
-  the Twilio trial account's 50-messages/day limit blocks replies once exceeded. Resolved
-  by upgrading the Twilio account out of trial.
-- **Exports**: monthly/annual multi-CSV packs (partner note G) not yet built.
-- **"Real take-home" formula** in the weekly summary still needs a defined calculation.
+- **Payments not live.** Plan/access status exists (Flow I) but Stripe is referenced as a
+  future path only; no payment is actually taken yet, and pricing is intentionally not
+  hard-coded.
+- **Period at log time** still defaults to the current week/month. A period picker now
+  exists for summaries, exports, and the mileage edit menu, but not when first logging.
+- **"Real take-home" formula** — the summary now leads with an estimated take-home (Flow F);
+  the underlying formula should be reviewed against worked examples before launch.
+- **Twilio trial cap.** Onboarding sends many messages (Terms/Privacy gate + setup); the
+  Twilio trial account's 50-messages/day limit blocks replies once exceeded. Resolved by
+  upgrading the Twilio account out of trial.
 
 ---
 
-## [0.5.0] — 2026-06-09
+## [0.6.0] — 2026-06-09
 
-Richer mileage edit menu, and a fix so editing no longer loses the period.
+Richer mileage edit menu, and a fix so editing no longer loses the period. (PR #17)
 
 ### Added
 - **Edit a mileage record's vehicle and period**, not just the mileage. Replying `2`
@@ -51,6 +53,50 @@ Richer mileage edit menu, and a fix so editing no longer loses the period.
   now shows the record's stored period and input type instead of recomputing the current
   week — previously a monthly "1–30 Jun" entry would display as the current week after any
   edit.
+
+---
+
+## [0.5.0] — 2026-06-09
+
+Flows F–K: summaries, Excel export pack, shared period picker, settings hub, access
+status, graceful help, and the legal/data-rights flow. (PRs #9–#16)
+
+### Added
+- **Weekly/monthly summary (Flow F).** Period-aware `SUMMARY` leading with estimated
+  real take-home, with mileage-only / earnings-only / empty variants. Splits mileage by
+  vehicle, ranks platforms, lists review-only expenses separately, shows a logging streak,
+  and warns when mileage and earnings use different frequencies.
+- **Excel record pack as the standard export (Flow G).** `EXPORT` produces an `.xlsx`
+  workbook with six tabs (assumptions, income, mileage, non-vehicle expenses, review-only,
+  summary) via openpyxl, served through the `/export/{token}` link. CSV is repositioned as
+  a paid/pro option. `ExportLink` gains `fmt` + period.
+- **Shared period picker (`periods.py`).** `SUMMARY`/`EXPORT` accept a trailing period —
+  "this/last week", "this/last month", "this/last tax year" (UK 6 Apr–5 Apr), or a custom
+  range like "1 June to 30 June".
+- **Settings hub (Flow H).** Vehicle / Tax / Reminder / Account status / Export-or-delete
+  my data / Help. Per-user reminder day/time and on/off (scheduler runs daily and only
+  notifies users due that day); weekly/monthly logging toggle; delete-my-data with confirm.
+- **Access / subscription status (Flow I).** `plan_status` (beta/trial/active/paused/
+  cancelled/partner) with adaptive copy and a cancellation flow. Pricing is never
+  hard-coded; Stripe referenced as the future payment path (not yet live).
+- **Graceful help & fallbacks (Flow J).** Friendlier HELP and unknown-message handling;
+  canned replies for "is this tax advice?", unsupported tax questions, human/support
+  requests, and vehicle-cost questions. **Multi-item messages** ("120 miles, Uber £300,
+  bag £45") create a pending record per item for confirmation.
+- **Terms, privacy & data rights (Flow K, `legal.py`).** In-app Terms/Privacy summaries and
+  full texts (versioned), a data-rights submenu (export/correct/delete), and an in-service
+  support route. Tracks `privacy_version` + `privacy_shown_at`.
+
+### Fixed
+- **Schema readiness on startup.** `init_db()` only ran in the deprecated
+  `@app.on_event("startup")`, which doesn't fire reliably on newer FastAPI — so columns
+  were sometimes missing and onboarding failed after the tax question. Moved to a lifespan
+  handler + a lazy idempotent `_ensure_started()` at the top of `handle_inbound`; handler
+  errors now roll back and reply gracefully with a full traceback in logs.
+
+### Note
+These flows shipped through the `onboarding-rewrite-and-cli` branch (PRs #9–#16) without
+changelog entries; this 0.5.0 section backfills them from the merged code.
 
 ---
 
@@ -173,8 +219,9 @@ Initial MVP backend and first Railway deployment.
 
 ---
 
-[Unreleased]: https://github.com/mototaxuk-lab/mototax/compare/a17c49b...HEAD
-[0.5.0]: https://github.com/mototaxuk-lab/mototax/compare/e19df90...HEAD
+[Unreleased]: https://github.com/mototaxuk-lab/mototax/compare/0e0bca8...HEAD
+[0.6.0]: https://github.com/mototaxuk-lab/mototax/pull/17
+[0.5.0]: https://github.com/mototaxuk-lab/mototax/compare/a17c49b...223ea5b
 [0.4.0]: https://github.com/mototaxuk-lab/mototax/pull/7
 [0.3.1]: https://github.com/mototaxuk-lab/mototax/compare/a14f6dc...9803458
 [0.3.0]: https://github.com/mototaxuk-lab/mototax/pull/1

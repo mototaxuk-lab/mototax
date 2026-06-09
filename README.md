@@ -7,13 +7,14 @@ mileage messages into a confirmed, tax-ready ledger and an accountant-ready CSV.
 Postgres · deploys on Railway from GitHub.
 
 <!-- VERSION:START — auto-generated from CHANGELOG.md by .githooks/pre-push; do not edit by hand -->
-![Version](https://img.shields.io/badge/version-0.5.0-blue) ![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-informational)
+![Version](https://img.shields.io/badge/version-0.6.0-blue) ![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-informational)
 
 ### Version history
 
 | Version | Date | Summary |
 |---------|------|---------|
-| **0.5.0** | 2026-06-09 | Richer mileage edit menu, and a fix so editing no longer loses the period. |
+| **0.6.0** | 2026-06-09 | Richer mileage edit menu, and a fix so editing no longer loses the period. (PR #17) |
+| **0.5.0** | 2026-06-09 | Flows F–K: summaries, Excel export pack, shared period picker, settings hub, access status, graceful help, and the legal/data-rights flow. (PRs #9–#16) |
 | **0.4.0** | 2026-06-09 | Full product flows A–E. Brings `main` up to date with the complete onboarding/records feature set. (PR #7) |
 | **0.3.1** | 2026-06-03 | Local testing tooling and harness refinements. (PRs #3–#6) |
 | **0.3.0** | 2026-06-03 | Onboarding rewrite and a local testing harness. (PRs #1/#2) |
