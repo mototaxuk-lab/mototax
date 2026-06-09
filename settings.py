@@ -227,17 +227,9 @@ def _h_menu(db, user, number, low, payload):
         db.commit()
         wa.send_whatsapp(number, _reminder_menu(user))
     elif choice in ("4", "account status", "account"):
-        rem = ("off" if user.reminder_status == "off"
-               else f"{_DAY_NAMES.get(user.reminder_day, 'Sunday')} {user.reminder_time_label}")
-        wa.send_whatsapp(
-            number,
-            "Account status:\n\n"
-            "Plan: Free trial\n"
-            "Trial status: Active\n"
-            "Standard export: Excel record pack\n"
-            f"Reminder: {rem}\n\n"
-            "Your first month is free. After that, it's £5/month.\n\n"
-            "Type MENU to go back, or DONE to close settings.")
+        _go(user, "account")
+        db.commit()
+        wa.send_whatsapp(number, _account_status(user))
     elif choice in ("5", "export or delete my data", "export", "delete", "data"):
         _go(user, "data")
         db.commit()
@@ -304,6 +296,130 @@ def _h_delete_confirm(db, user, number, low, payload):
     else:
         wa.send_whatsapp(number, "No change made — your records are safe.")
         _back_to_menu(db, user, number)
+
+
+# --- Flow I: access / subscription (no hard-coded pricing) -------------------
+
+_PLAN_LABELS = {
+    "beta": "Free beta", "trial": "Free trial", "active": "Active plan",
+    "paused": "Paused", "cancelled": "Cancelled", "partner": "Partner-sponsored",
+}
+
+
+def _account_status(user) -> str:
+    rem = ("off" if user.reminder_status == "off"
+           else f"{_DAY_NAMES.get(user.reminder_day, 'Sunday')} {user.reminder_time_label}")
+    plan = _PLAN_LABELS.get(getattr(user, "plan_status", "beta"), "Free beta")
+    return (
+        "Account status:\n\n"
+        f"Plan: {plan}\n"
+        "Standard export: Excel record pack\n"
+        f"Reminder: {rem}\n\n"
+        "What do you want to do?\n\n"
+        + _numbered(["Payment / access", "Export records", "Back"])
+    )
+
+
+def _payment_options(status: str) -> tuple[str, list[str]]:
+    """Body copy + option labels for the current access model (Flow I §1–5)."""
+    if status in ("beta", "trial"):
+        return ("You're in the free beta ✅\n\n"
+                "You can use weekly tracking and record exports while we test the "
+                "service.\n\nPaid access isn't available yet — we'll let you know "
+                "before any paid access is introduced, and pricing will always be "
+                "shown before payment.",
+                ["Notify me about pricing", "Export my records", "Back"])
+    if status == "active":
+        return ("Your plan is active ✅\n\n"
+                "You can manage your subscription securely through Stripe. We don't "
+                "store your card details.",
+                ["Manage subscription", "Cancel access", "Export my records", "Back"])
+    if status == "paused":
+        return ("Your access is currently paused.\n\n"
+                "You can still export previous records for a limited time, but new "
+                "tracking and export features require active access.",
+                ["Reactivate access", "Export my records", "Back"])
+    if status == "partner":
+        return ("Your access is covered through a partner programme ✅\n\n"
+                "You can use the included tracking and export features while your "
+                "sponsored access is active.",
+                ["Export my records", "Back"])
+    return ("Your access is cancelled.\n\nYou can still export previous records for a "
+            "limited time.", ["Reactivate access", "Export my records", "Back"])
+
+
+def _payment_message(user) -> str:
+    body, opts = _payment_options(getattr(user, "plan_status", "beta"))
+    return body + "\n\n" + _numbered(opts)
+
+
+def _h_account(db, user, number, low, payload):
+    if low in ("1", "payment / access", "payment", "access", "subscription"):
+        _go(user, "payment")
+        db.commit()
+        wa.send_whatsapp(number, _payment_message(user))
+    elif low in ("2", "export records", "export"):
+        _data_download(db, user, number)
+        _back_to_menu(db, user, number)
+    elif low in ("3", "back", "cancel"):
+        _back_to_menu(db, user, number)
+    else:
+        wa.send_whatsapp(number, "Please reply 1, 2 or 3.")
+
+
+def _h_payment(db, user, number, low, payload):
+    status = getattr(user, "plan_status", "beta")
+    _, opts = _payment_options(status)
+    # Resolve a numeric reply to its label, then act on the label.
+    label = low
+    if low.isdigit() and 1 <= int(low) <= len(opts):
+        label = opts[int(low) - 1].lower()
+
+    if label in ("back", "cancel"):
+        _back_to_menu(db, user, number)
+    elif label == "notify me about pricing":
+        wa.send_whatsapp(number, "👍 I'll let you know when paid access and pricing "
+                         "are available.")
+        _back_to_menu(db, user, number)
+    elif label in ("manage subscription", "reactivate access"):
+        wa.send_whatsapp(number, "You'll be able to manage your access securely "
+                         "through Stripe.\n\nSecure payments aren't switched on yet — "
+                         "you'll get a payment link here once paid access launches.")
+        _back_to_menu(db, user, number)
+    elif label == "cancel access":
+        _go(user, "cancel_confirm")
+        db.commit()
+        wa.send_whatsapp(number, "Cancel your access?\n\nIf you cancel, tracking will "
+                         "stop after your current access period. You can still export "
+                         "previous records for a limited time.\n\n"
+                         + _numbered(["Confirm cancellation", "Keep access"]))
+    elif "export" in label:
+        _data_download(db, user, number)
+        _back_to_menu(db, user, number)
+    else:
+        wa.send_whatsapp(number, _payment_message(user))
+
+
+def _h_cancel_confirm(db, user, number, low, payload):
+    if low in ("1", "confirm cancellation", "confirm", "yes"):
+        user.plan_status = "cancelled"
+        _go(user, None)
+        db.commit()
+        wa.send_whatsapp(number, "Cancellation confirmed.\n\nYour access will remain "
+                         "active until the end of your current access period. You can "
+                         "export your records before access ends.")
+    else:
+        wa.send_whatsapp(number, "No change made — your access is kept.")
+        _back_to_menu(db, user, number)
+
+
+def _data_download(db, user, number) -> None:
+    token = make_export_link(db, user.id, fmt="xlsx")
+    if config.PUBLIC_BASE_URL:
+        wa.send_whatsapp(number, "Your Excel record pack (link valid 24h):\n"
+                         f"{config.PUBLIC_BASE_URL}/export/{token}")
+    else:
+        wa.send_whatsapp(number, "Export link isn't configured yet (set PUBLIC_BASE_URL).")
 
 
 def _h_tax(db, user, number, low, payload):
@@ -636,6 +752,9 @@ _STATES = {
     "reminder_off": _h_reminder_off,
     "data": _h_data,
     "delete_confirm": _h_delete_confirm,
+    "account": _h_account,
+    "payment": _h_payment,
+    "cancel_confirm": _h_cancel_confirm,
     "vehicle": _h_vehicle,
     "add": _h_add,
     "added": _h_added,
@@ -671,6 +790,21 @@ def _nl_intent(db, user, number, low) -> bool:
                 db.commit()
                 wa.send_whatsapp(number, _reminder_menu(user))
                 return True
+
+    # Payment/subscription intents (Flow I): "subscription", "cancel my plan",
+    # "how much", "pricing", "upgrade".
+    if any(w in low for w in ("subscription", "payment", "pricing", "upgrade",
+                              "how much", "my plan", "billing", "cancel my plan",
+                              "free trial", "paid access")):
+        _go(user, "payment")
+        db.commit()
+        wa.send_whatsapp(number, _payment_message(user))
+        return True
+
+    # "download my records" → Excel pack link.
+    if "download" in low and ("record" in low or "data" in low or "pack" in low):
+        _data_download(db, user, number)
+        return True
 
     # Data intents (Flow H §13): "delete my data", "download my records".
     if "delete" in low and ("data" in low or "record" in low or "account" in low):
