@@ -101,6 +101,7 @@ def _vehicle_settings_overview(user) -> str:
     return (
         "Vehicle settings\n\n"
         f"Main vehicle: {tax.label(user.vehicle_type)}\n"
+        f"Default vehicle: {tax.label(default_vehicle(user))}\n"
         f"Other vehicles: {other}\n\n"
         "What do you want to do?\n\n"
         + _numbered([
@@ -134,10 +135,21 @@ _MAIN_MENU = (
         "Vehicle settings",
         "Tax estimate level",
         "Reminder settings",
-        "Subscription / payment",
+        "Account status",
         "Export or delete my data",
+        "Help",
+        "Terms & privacy",
     ])
 )
+
+# Reminder day options (Flow H §8): label -> (day_abbrev, time_label).
+_REMINDER_OPTIONS = [
+    ("Sunday evening", "sun", "evening"),
+    ("Monday morning", "mon", "morning"),
+    ("Friday evening", "fri", "evening"),
+]
+_DAY_NAMES = {"mon": "Monday", "tue": "Tuesday", "wed": "Wednesday",
+              "thu": "Thursday", "fri": "Friday", "sat": "Saturday", "sun": "Sunday"}
 
 _TAX_MENU = (
     "Which tax rate should I use for rough tax-benefit estimates?\n\n"
@@ -215,25 +227,326 @@ def _h_menu(db, user, number, low, payload):
         _go(user, "reminder")
         db.commit()
         wa.send_whatsapp(number, _reminder_menu(user))
-    elif choice in ("4", "subscription / payment", "subscription", "payment"):
+    elif choice in ("4", "account status", "account"):
+        _go(user, "account")
+        db.commit()
+        wa.send_whatsapp(number, _account_status(user))
+    elif choice in ("5", "export or delete my data", "export", "delete", "data"):
+        _go(user, "data")
+        db.commit()
+        wa.send_whatsapp(number, "What would you like to do?\n\n"
+                         + _numbered(["Download my records", "Delete my data", "Back"]))
+    elif choice in ("6", "help", "what can you do", "what can you do?"):
+        wa.send_whatsapp(number, _HELP_MESSAGE)
+        _go(user, None)
+        db.commit()
+    elif choice in ("7", "terms & privacy", "terms and privacy", "terms", "privacy"):
+        _go(user, "terms_privacy")
+        db.commit()
+        wa.send_whatsapp(number, _TERMS_PRIVACY_MENU)
+    else:
+        wa.send_whatsapp(number, "Please reply with an option number.\n\n" + _MAIN_MENU)
+
+
+# --- Flow K: Terms & Privacy, data rights, support ---------------------------
+
+_TERMS_PRIVACY_MENU = (
+    "What would you like to view?\n\n"
+    + _numbered(["Terms summary", "Privacy summary", "Full Terms", "Full Privacy "
+                 "Notice", "Data rights", "Support", "Back"])
+)
+
+
+def _h_terms_privacy(db, user, number, low, payload):
+    import legal
+    if low in ("1", "terms summary", "terms"):
+        wa.send_whatsapp(number, legal.TERMS_SUMMARY)
+    elif low in ("2", "privacy summary", "privacy"):
+        user.privacy_version = legal.PRIVACY_VERSION
+        from models import now as _now
+        user.privacy_shown_at = _now()
+        db.commit()
+        wa.send_whatsapp(number, legal.PRIVACY_SUMMARY)
+    elif low in ("3", "full terms", "full terms ", "terms full"):
+        wa.send_whatsapp(number, legal.TERMS_FULL)
+    elif low in ("4", "full privacy notice", "full privacy", "privacy full"):
+        user.privacy_version = legal.PRIVACY_VERSION
+        from models import now as _now
+        user.privacy_shown_at = _now()
+        db.commit()
+        wa.send_whatsapp(number, legal.PRIVACY_FULL)
+    elif low in ("5", "data rights", "rights"):
+        _go(user, "data_rights")
+        db.commit()
+        wa.send_whatsapp(number, _DATA_RIGHTS_MENU)
+        return
+    elif low in ("6", "support"):
+        _go(user, "support")
+        db.commit()
+        wa.send_whatsapp(number, _SUPPORT_MENU)
+        return
+    elif low in ("7", "back", "cancel"):
+        _back_to_menu(db, user, number)
+        return
+    else:
+        wa.send_whatsapp(number, "Please reply with an option number.\n\n"
+                         + _TERMS_PRIVACY_MENU)
+        return
+    # After showing a document, re-offer the menu.
+    wa.send_whatsapp(number, _TERMS_PRIVACY_MENU)
+
+
+_DATA_RIGHTS_MENU = (
+    "You can request to export, correct or delete your data.\n\n"
+    "What would you like to do?\n\n"
+    + _numbered(["Export my data", "Correct my data", "Delete my data", "Support",
+                 "Back"])
+)
+
+
+def _h_data_rights(db, user, number, low, payload):
+    if low in ("1", "export my data", "export"):
+        _data_download(db, user, number)
+        _back_to_menu(db, user, number)
+    elif low in ("2", "correct my data", "correct"):
         wa.send_whatsapp(
             number,
-            "Your first month is free, then £5/month.\n\nBilling management is "
-            "coming soon.\n\nType MENU to go back, or DONE to close settings.",
-        )
-    elif choice in ("5", "export or delete my data", "export", "delete"):
-        token = make_export_link(db, user.id)
+            "To correct records: change your vehicle or tax estimate in SETTINGS, or "
+            "re-send a corrected entry (e.g. \"115 miles\") and confirm it. Past "
+            "confirmed records aren't changed automatically.")
+        wa.send_whatsapp(number, _DATA_RIGHTS_MENU)
+    elif low in ("3", "delete my data", "delete"):
+        _go(user, "delete_confirm")
+        db.commit()
+        wa.send_whatsapp(
+            number,
+            "Delete your stored records?\n\nThis will remove your confirmed records "
+            "and settings from the service.\n\nSome limited information may be kept "
+            "for legal, security, accounting or technical reasons.\n\n"
+            + _numbered(["Confirm delete", "Cancel"]))
+    elif low in ("4", "support"):
+        _go(user, "support")
+        db.commit()
+        wa.send_whatsapp(number, _SUPPORT_MENU)
+    elif low in ("5", "back", "cancel"):
+        _go(user, "terms_privacy")
+        db.commit()
+        wa.send_whatsapp(number, _TERMS_PRIVACY_MENU)
+    else:
+        wa.send_whatsapp(number, "Please reply with an option number.\n\n"
+                         + _DATA_RIGHTS_MENU)
+
+
+_SUPPORT_MENU = (
+    "You can get support through the service.\n\n"
+    "Support is limited while we're testing — choose what you need help with and "
+    "we'll guide you. (For tax advice or filing, please speak to an accountant.)\n\n"
+    + _numbered(["Terms help", "Privacy help", "Data request help", "Back"])
+)
+
+
+def _h_support(db, user, number, low, payload):
+    if low in ("1", "terms help"):
+        wa.send_whatsapp(number, "Terms help: the service organises your records "
+                         "but doesn't file your tax or give tax advice. Reply 7 in "
+                         "Terms & privacy for the full Terms.")
+        wa.send_whatsapp(number, _SUPPORT_MENU)
+    elif low in ("2", "privacy help"):
+        wa.send_whatsapp(number, "Privacy help: we save only confirmed records; "
+                         "earnings screenshots and receipts aren't stored. You can "
+                         "export or delete your data anytime from Data rights.")
+        wa.send_whatsapp(number, _SUPPORT_MENU)
+    elif low in ("3", "data request help"):
+        wa.send_whatsapp(number, "Data request help: use Data rights to export or "
+                         "delete your records. Deletion may keep limited info for "
+                         "legal/technical reasons.")
+        wa.send_whatsapp(number, _SUPPORT_MENU)
+    elif low in ("4", "back", "cancel"):
+        _go(user, "terms_privacy")
+        db.commit()
+        wa.send_whatsapp(number, _TERMS_PRIVACY_MENU)
+    else:
+        wa.send_whatsapp(number, "Please reply with an option number.\n\n"
+                         + _SUPPORT_MENU)
+
+
+_HELP_MESSAGE = (
+    "You can send me:\n\n"
+    "• delivery miles, e.g. \"120 miles\"\n"
+    "• earnings, e.g. \"Uber Eats £320\"\n"
+    "• earnings screenshots\n"
+    "• courier expenses, e.g. \"Delivery bag £45\"\n"
+    "• receipts for temporary OCR\n\n"
+    "I organise confirmed records into summaries and Excel record packs for "
+    "accountant review.\n\n"
+    "Type SUMMARY, EXPORT, or SETTINGS anytime."
+)
+
+
+def _h_data(db, user, number, low, payload):
+    if low in ("1", "download my records", "download", "export"):
+        token = make_export_link(db, user.id, fmt="xlsx")
         if config.PUBLIC_BASE_URL:
-            wa.send_whatsapp(number, f"Your CSV (link valid 24h):\n"
-                             f"{config.PUBLIC_BASE_URL}/export/{token}\n\n"
-                             "To request data deletion, reply DELETE MY DATA.")
+            wa.send_whatsapp(number, "Your Excel record pack (link valid 24h):\n"
+                             f"{config.PUBLIC_BASE_URL}/export/{token}")
         else:
             wa.send_whatsapp(number, "Export link isn't configured yet "
                              "(set PUBLIC_BASE_URL).")
+        _back_to_menu(db, user, number)
+    elif low in ("2", "delete my data", "delete"):
+        _go(user, "delete_confirm")
+        db.commit()
+        wa.send_whatsapp(
+            number,
+            "Delete your stored records?\n\n"
+            "This will remove your confirmed records and settings from the service.\n\n"
+            "This cannot be undone.\n\n"
+            + _numbered(["Confirm delete", "Cancel"]))
+    elif low in ("3", "back", "cancel"):
+        _back_to_menu(db, user, number)
+    else:
+        wa.send_whatsapp(number, "Please reply 1, 2 or 3.")
+
+
+def _h_delete_confirm(db, user, number, low, payload):
+    if low in ("1", "confirm delete", "confirm", "yes"):
+        from models import Record, ExportLink
+        db.query(Record).filter(Record.user_id == user.id).delete()
+        db.query(ExportLink).filter(ExportLink.user_id == user.id).delete()
+        user.reminder_status = "off"
         _go(user, None)
         db.commit()
+        wa.send_whatsapp(
+            number,
+            "Your data deletion request has been received.\n\n"
+            "Your records will be deleted according to our data deletion process.")
     else:
-        wa.send_whatsapp(number, "Please reply with an option number.\n\n" + _MAIN_MENU)
+        wa.send_whatsapp(number, "No change made — your records are safe.")
+        _back_to_menu(db, user, number)
+
+
+# --- Flow I: access / subscription (no hard-coded pricing) -------------------
+
+_PLAN_LABELS = {
+    "beta": "Free beta", "trial": "Free trial", "active": "Active plan",
+    "paused": "Paused", "cancelled": "Cancelled", "partner": "Partner-sponsored",
+}
+
+
+def _account_status(user) -> str:
+    rem = ("off" if user.reminder_status == "off"
+           else f"{_DAY_NAMES.get(user.reminder_day, 'Sunday')} {user.reminder_time_label}")
+    plan = _PLAN_LABELS.get(getattr(user, "plan_status", "beta"), "Free beta")
+    return (
+        "Account status:\n\n"
+        f"Plan: {plan}\n"
+        "Standard export: Excel record pack\n"
+        f"Reminder: {rem}\n\n"
+        "What do you want to do?\n\n"
+        + _numbered(["Payment / access", "Export records", "Back"])
+    )
+
+
+def _payment_options(status: str) -> tuple[str, list[str]]:
+    """Body copy + option labels for the current access model (Flow I §1–5)."""
+    if status in ("beta", "trial"):
+        return ("You're in the free beta ✅\n\n"
+                "You can use weekly tracking and record exports while we test the "
+                "service.\n\nPaid access isn't available yet — we'll let you know "
+                "before any paid access is introduced, and pricing will always be "
+                "shown before payment.",
+                ["Notify me about pricing", "Export my records", "Back"])
+    if status == "active":
+        return ("Your plan is active ✅\n\n"
+                "You can manage your subscription securely through Stripe. We don't "
+                "store your card details.",
+                ["Manage subscription", "Cancel access", "Export my records", "Back"])
+    if status == "paused":
+        return ("Your access is currently paused.\n\n"
+                "You can still export previous records for a limited time, but new "
+                "tracking and export features require active access.",
+                ["Reactivate access", "Export my records", "Back"])
+    if status == "partner":
+        return ("Your access is covered through a partner programme ✅\n\n"
+                "You can use the included tracking and export features while your "
+                "sponsored access is active.",
+                ["Export my records", "Back"])
+    return ("Your access is cancelled.\n\nYou can still export previous records for a "
+            "limited time.", ["Reactivate access", "Export my records", "Back"])
+
+
+def _payment_message(user) -> str:
+    body, opts = _payment_options(getattr(user, "plan_status", "beta"))
+    return body + "\n\n" + _numbered(opts)
+
+
+def _h_account(db, user, number, low, payload):
+    if low in ("1", "payment / access", "payment", "access", "subscription"):
+        _go(user, "payment")
+        db.commit()
+        wa.send_whatsapp(number, _payment_message(user))
+    elif low in ("2", "export records", "export"):
+        _data_download(db, user, number)
+        _back_to_menu(db, user, number)
+    elif low in ("3", "back", "cancel"):
+        _back_to_menu(db, user, number)
+    else:
+        wa.send_whatsapp(number, "Please reply 1, 2 or 3.")
+
+
+def _h_payment(db, user, number, low, payload):
+    status = getattr(user, "plan_status", "beta")
+    _, opts = _payment_options(status)
+    # Resolve a numeric reply to its label, then act on the label.
+    label = low
+    if low.isdigit() and 1 <= int(low) <= len(opts):
+        label = opts[int(low) - 1].lower()
+
+    if label in ("back", "cancel"):
+        _back_to_menu(db, user, number)
+    elif label == "notify me about pricing":
+        wa.send_whatsapp(number, "👍 I'll let you know when paid access and pricing "
+                         "are available.")
+        _back_to_menu(db, user, number)
+    elif label in ("manage subscription", "reactivate access"):
+        wa.send_whatsapp(number, "You'll be able to manage your access securely "
+                         "through Stripe.\n\nSecure payments aren't switched on yet — "
+                         "you'll get a payment link here once paid access launches.")
+        _back_to_menu(db, user, number)
+    elif label == "cancel access":
+        _go(user, "cancel_confirm")
+        db.commit()
+        wa.send_whatsapp(number, "Cancel your access?\n\nIf you cancel, tracking will "
+                         "stop after your current access period. You can still export "
+                         "previous records for a limited time.\n\n"
+                         + _numbered(["Confirm cancellation", "Keep access"]))
+    elif "export" in label:
+        _data_download(db, user, number)
+        _back_to_menu(db, user, number)
+    else:
+        wa.send_whatsapp(number, _payment_message(user))
+
+
+def _h_cancel_confirm(db, user, number, low, payload):
+    if low in ("1", "confirm cancellation", "confirm", "yes"):
+        user.plan_status = "cancelled"
+        _go(user, None)
+        db.commit()
+        wa.send_whatsapp(number, "Cancellation confirmed.\n\nYour access will remain "
+                         "active until the end of your current access period. You can "
+                         "export your records before access ends.")
+    else:
+        wa.send_whatsapp(number, "No change made — your access is kept.")
+        _back_to_menu(db, user, number)
+
+
+def _data_download(db, user, number) -> None:
+    token = make_export_link(db, user.id, fmt="xlsx")
+    if config.PUBLIC_BASE_URL:
+        wa.send_whatsapp(number, "Your Excel record pack (link valid 24h):\n"
+                         f"{config.PUBLIC_BASE_URL}/export/{token}")
+    else:
+        wa.send_whatsapp(number, "Export link isn't configured yet (set PUBLIC_BASE_URL).")
 
 
 def _h_tax(db, user, number, low, payload):
@@ -252,33 +565,62 @@ def _h_tax(db, user, number, low, payload):
 
 
 def _reminder_menu(user) -> str:
-    current = (getattr(user, "log_frequency", "weekly") or "weekly").capitalize()
+    if user.reminder_status == "off":
+        current = "off"
+    else:
+        current = f"{_DAY_NAMES.get(user.reminder_day, 'Sunday')} {user.reminder_time_label}"
+    log_opt = ("Switch to monthly logging"
+               if (getattr(user, "log_frequency", "weekly") or "weekly") == "weekly"
+               else "Switch to weekly logging")
+    opts = [lbl for lbl, _, _ in _REMINDER_OPTIONS] + \
+        ["Turn reminders off", log_opt, "Back"]
     return (
-        "Logging frequency\n\n"
-        f"Currently: {current}\n\n"
-        "How often do you want to log your miles and earnings?\n\n"
-        + _numbered(["Weekly (recommended)", "Monthly", "Back"])
-        + "\n\nReminders are sent every Sunday evening for now."
+        f"Current reminder: {current}\n\n"
+        "When should I remind you to send your delivery miles?\n\n"
+        + _numbered(opts)
     )
 
 
 def _h_reminder(db, user, number, low, payload):
-    if low in ("1", "weekly", "weekly (recommended)"):
-        user.log_frequency = "weekly"
+    # 1-3 = day options, 4 = off, 5 = toggle logging frequency, 6 = back.
+    if low.isdigit() and 1 <= int(low) <= len(_REMINDER_OPTIONS):
+        label, day, tlabel = _REMINDER_OPTIONS[int(low) - 1]
+        user.reminder_day, user.reminder_time_label = day, tlabel
+        user.reminder_status = "active"
         _go(user, None)
         db.commit()
-        wa.send_whatsapp(number, "Updated ✅ I'll treat new entries as weekly by "
-                         "default. You can still say \"this month\" any time.")
-    elif low in ("2", "monthly"):
-        user.log_frequency = "monthly"
+        wa.send_whatsapp(number, f"Reminder updated ✅\n\nI'll remind you every "
+                         f"{label} to send your delivery miles.")
+    elif low in ("4", "turn reminders off", "off", "stop"):
+        _go(user, "reminder_off")
+        db.commit()
+        wa.send_whatsapp(number, "Turn off reminders?\n\nYou can still send mileage, "
+                         "earnings and expenses anytime.\n\n"
+                         + _numbered(["Confirm", "Cancel"]))
+    elif low == "5":
+        new = "monthly" if (user.log_frequency or "weekly") == "weekly" else "weekly"
+        user.log_frequency = new
         _go(user, None)
         db.commit()
-        wa.send_whatsapp(number, "Updated ✅ I'll treat new entries as monthly by "
-                         "default. You can still say \"this week\" any time.")
-    elif low in ("3", "back", "cancel"):
+        wa.send_whatsapp(number, f"Updated ✅ I'll treat new entries as {new} by "
+                         "default. You can still say \"this week\"/\"this month\" any time.")
+    elif low in ("6", "back", "cancel"):
         _back_to_menu(db, user, number)
     else:
-        wa.send_whatsapp(number, "Please reply 1, 2 or 3.\n\n" + _reminder_menu(user))
+        wa.send_whatsapp(number, "Please reply with an option number.\n\n"
+                         + _reminder_menu(user))
+
+
+def _h_reminder_off(db, user, number, low, payload):
+    if low in ("1", "confirm", "yes"):
+        user.reminder_status = "off"
+        _go(user, None)
+        db.commit()
+        wa.send_whatsapp(number, "Reminders turned off ✅\n\nYou can turn them back "
+                         "on anytime in settings.")
+    else:
+        wa.send_whatsapp(number, "Kept your reminders on.")
+        _back_to_menu(db, user, number)
 
 
 def _h_vehicle(db, user, number, low, payload):
@@ -534,6 +876,15 @@ _STATES = {
     "menu": _h_menu,
     "tax": _h_tax,
     "reminder": _h_reminder,
+    "reminder_off": _h_reminder_off,
+    "data": _h_data,
+    "delete_confirm": _h_delete_confirm,
+    "account": _h_account,
+    "payment": _h_payment,
+    "cancel_confirm": _h_cancel_confirm,
+    "terms_privacy": _h_terms_privacy,
+    "data_rights": _h_data_rights,
+    "support": _h_support,
     "vehicle": _h_vehicle,
     "add": _h_add,
     "added": _h_added,
@@ -553,6 +904,62 @@ _STATES = {
 def _nl_intent(db, user, number, low) -> bool:
     """Detect vehicle-settings intents in free text. Never changes data directly —
     routes to the relevant buttoned step. Returns True if matched."""
+    # Reminder intents (Flow H §13): "stop reminders", "remind me monday".
+    if ("reminder" in low or "remind" in low) and \
+            ("stop" in low or "off" in low or "turn off" in low or "disable" in low):
+        _go(user, "reminder_off")
+        db.commit()
+        wa.send_whatsapp(number, "Turn off reminders?\n\nYou can still send mileage, "
+                         "earnings and expenses anytime.\n\n"
+                         + _numbered(["Confirm", "Cancel"]))
+        return True
+    if "remind" in low:
+        for label, day, _ in _REMINDER_OPTIONS:
+            if day in low or _DAY_NAMES[day].lower() in low:
+                _go(user, "reminder")
+                db.commit()
+                wa.send_whatsapp(number, _reminder_menu(user))
+                return True
+
+    # Payment/subscription intents (Flow I): "subscription", "cancel my plan",
+    # "how much", "pricing", "upgrade".
+    if any(w in low for w in ("subscription", "payment", "pricing", "upgrade",
+                              "how much", "my plan", "billing", "cancel my plan",
+                              "free trial", "paid access")):
+        _go(user, "payment")
+        db.commit()
+        wa.send_whatsapp(number, _payment_message(user))
+        return True
+
+    # Flow K: terms / privacy / data rights from anywhere.
+    if low in ("terms", "view terms", "terms and conditions", "full terms",
+               "privacy", "privacy notice", "view privacy", "full privacy"):
+        _go(user, "terms_privacy")
+        db.commit()
+        wa.send_whatsapp(number, _TERMS_PRIVACY_MENU)
+        return True
+    if low in ("data rights", "my rights", "my data rights", "gdpr"):
+        _go(user, "data_rights")
+        db.commit()
+        wa.send_whatsapp(number, _DATA_RIGHTS_MENU)
+        return True
+
+    # "download my records" → Excel pack link.
+    if "download" in low and ("record" in low or "data" in low or "pack" in low):
+        _data_download(db, user, number)
+        return True
+
+    # Data intents (Flow H §13): "delete my data", "download my records".
+    if "delete" in low and ("data" in low or "record" in low or "account" in low):
+        _go(user, "delete_confirm")
+        db.commit()
+        wa.send_whatsapp(
+            number,
+            "Delete your stored records?\n\nThis will remove your confirmed records "
+            "and settings from the service.\n\nThis cannot be undone.\n\n"
+            + _numbered(["Confirm delete", "Cancel"]))
+        return True
+
     # "I use two cars" — same type, no new setting needed.
     if ("two car" in low or "2 car" in low or "two van" in low
             or "second car" in low):

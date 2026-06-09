@@ -68,6 +68,15 @@ class User(Base):
     # Terms & Privacy acceptance recorded during onboarding (Flow A).
     terms_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
     terms_accepted_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # Privacy Notice is shown for transparency (not consent); version tracked too.
+    privacy_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    privacy_shown_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    # Reminder schedule (Flow H). reminder_day: mon..sun; status: active|off.
+    reminder_day: Mapped[str] = mapped_column(String(3), default="sun")
+    reminder_time_label: Mapped[str] = mapped_column(String(8), default="evening")
+    reminder_status: Mapped[str] = mapped_column(String(8), default="active")
+    # Access model (Flow I): beta | trial | active | paused | cancelled | partner.
+    plan_status: Mapped[str] = mapped_column(String(12), default="beta")
 
     records: Mapped[list["Record"]] = relationship(back_populates="user")
 
@@ -114,6 +123,10 @@ class ExportLink(Base):
     token: Mapped[str] = mapped_column(String(48), primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+    # Export file format and period this link serves (Flow G).
+    fmt: Mapped[str] = mapped_column(String(8), default="xlsx")
+    period_start: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    period_end: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
 
 def init_db() -> None:
@@ -126,6 +139,7 @@ def init_db() -> None:
     Base.metadata.create_all(engine)
     _ensure_columns("users", _USER_ADDED_COLUMNS)
     _ensure_columns("records", _RECORD_ADDED_COLUMNS)
+    _ensure_columns("export_links", _EXPORT_LINK_ADDED_COLUMNS)
 
 
 _FLOAT_SQL = "FLOAT" if engine.url.drivername.startswith("sqlite") else "DOUBLE PRECISION"
@@ -142,12 +156,23 @@ _USER_ADDED_COLUMNS = {
     "log_frequency": "VARCHAR(8) DEFAULT 'weekly'",
     "terms_version": "VARCHAR(16)",
     "terms_accepted_at": "TIMESTAMP",
+    "privacy_version": "VARCHAR(16)",
+    "privacy_shown_at": "TIMESTAMP",
+    "reminder_day": "VARCHAR(3) DEFAULT 'sun'",
+    "reminder_time_label": "VARCHAR(8) DEFAULT 'evening'",
+    "reminder_status": "VARCHAR(8) DEFAULT 'active'",
+    "plan_status": "VARCHAR(12) DEFAULT 'beta'",
 }
 _RECORD_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",
     "period_start": "VARCHAR(10)",
     "period_end": "VARCHAR(10)",
     "entry_frequency": "VARCHAR(8)",
+}
+_EXPORT_LINK_ADDED_COLUMNS = {
+    "fmt": "VARCHAR(8) DEFAULT 'xlsx'",
+    "period_start": "VARCHAR(10)",
+    "period_end": "VARCHAR(10)",
 }
 
 
@@ -212,8 +237,11 @@ def latest_awaiting_platform(db: Session, user_id: int) -> Record | None:
     )
 
 
-def make_export_link(db: Session, user_id: int) -> str:
+def make_export_link(db: Session, user_id: int, fmt: str = "xlsx",
+                     period_start: str | None = None,
+                     period_end: str | None = None) -> str:
     token = secrets.token_urlsafe(24)
-    db.add(ExportLink(token=token, user_id=user_id))
+    db.add(ExportLink(token=token, user_id=user_id, fmt=fmt,
+                      period_start=period_start, period_end=period_end))
     db.commit()
     return token

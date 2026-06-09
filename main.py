@@ -23,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger
 import config
 import export
 import extract
+import periods
 import reminders
 import settings as vehicle_settings
 import tax
@@ -80,7 +81,16 @@ def _review_warning(kind: str, description: str, amount: float | None) -> str:
             f"{line}")
     return f"{head}\n{_REVIEW_FOOTER}"
 
-app = FastAPI(title="Courier Tax & Records Assistant")
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _lifespan(app):
+    _ensure_started()
+    yield
+
+
+app = FastAPI(title="Courier Tax & Records Assistant", lifespan=_lifespan)
 
 WELCOME = (
     "Welcome 👋\n\n"
@@ -210,9 +220,9 @@ HOW_IT_WORKS = (
 )
 
 FREE_TRIAL = (
-    "Your first month is free.\n\n"
-    "After that, it's £5/month to keep weekly tracking, monthly exports and annual "
-    "records."
+    "You're in the free beta ✅\n\n"
+    "You can use weekly tracking and record exports while we test the service.\n\n"
+    "We'll let you know before any paid access is introduced."
 )
 
 FIRST_ACTION = (
@@ -241,11 +251,24 @@ SKIP_REPLY = (
 )
 
 HELP = (
-    "Send a receipt or earnings screenshot, or type your mileage like \"145 miles\".\n"
-    "After I read something, reply 1 to confirm, 2 to edit, or 3 to delete.\n"
-    "Got more than one vehicle? Type \"use car\", \"use motorbike\" or \"use bike\" to switch, "
-    "or VEHICLES to see them.\n"
-    "Type CSV for your export, SUMMARY for your totals, or SETTINGS to update your profile."
+    "I can help you keep delivery-work records in WhatsApp.\n\n"
+    "You can send:\n\n"
+    "• Mileage — \"120 miles\"\n"
+    "• Earnings — an Uber Eats / Deliveroo / Just Eat screenshot, or \"Uber Eats £320\"\n"
+    "• Expenses — \"Delivery bag £45\"\n"
+    "• Summary — type SUMMARY to see this week's records\n"
+    "• Export — type EXPORT to create your record pack\n"
+    "• Settings — type SETTINGS to update your profile\n\n"
+    "What would you like to do?"
+)
+
+UNKNOWN = (
+    "I'm not sure how to log that yet.\n\n"
+    "You can send records like this:\n\n"
+    "• \"120 miles\"\n"
+    "• \"Uber Eats £320\"\n"
+    "• \"Delivery bag £45\"\n\n"
+    "What would you like to add? (Type HELP for more.)"
 )
 
 # --- Onboarding answer parsing -------------------------------------------------
@@ -273,29 +296,31 @@ def _parse_tax_rate(text: str) -> float | None:
 
 
 _scheduler: BackgroundScheduler | None = None
+_started = False
 
 
-@app.on_event("startup")
-def _startup() -> None:
+def _ensure_started() -> None:
+    """Create/migrate tables and start the scheduler. Idempotent, and called both
+    at app startup and lazily before handling a message, so the schema is always
+    ready regardless of how the app is launched."""
+    global _started, _scheduler
+    if _started:
+        return
     init_db()
-    global _scheduler
     if config.REMINDERS_ENABLED and _scheduler is None:
         _scheduler = BackgroundScheduler(timezone="UTC")
+        # Fire daily; send_reminders() picks the users whose reminder_day is today
+        # and whose reminders are active (Flow H per-user schedule).
         _scheduler.add_job(
             reminders.send_reminders,
-            CronTrigger(
-                day_of_week=config.REMINDER_DAY,
-                hour=config.REMINDER_HOUR_UTC,
-                minute=0,
-                timezone="UTC",
-            ),
-            id="weekly_reminder",
+            CronTrigger(hour=config.REMINDER_HOUR_UTC, minute=0, timezone="UTC"),
+            id="daily_reminder_check",
             misfire_grace_time=3600,
             replace_existing=True,
         )
         _scheduler.start()
-        print(f"[startup] weekly reminder scheduled: {config.REMINDER_DAY} "
-              f"{config.REMINDER_HOUR_UTC:02d}:00 UTC")
+        print(f"[startup] daily reminder check at {config.REMINDER_HOUR_UTC:02d}:00 UTC")
+    _started = True
 
 
 @app.get("/", response_class=PlainTextResponse)
@@ -342,12 +367,21 @@ def export_csv(token: str):
         age = now() - link.created_at.replace(tzinfo=dt.timezone.utc)
         if age > dt.timedelta(hours=24):
             return PlainTextResponse("Link expired.", status_code=410)
-        csv_text = export.build_csv(db, link.user_id)
-        filename = f"courier-records-{dt.date.today().isoformat()}.csv"
+        today = dt.date.today().isoformat()
+        ps, pe = getattr(link, "period_start", None), getattr(link, "period_end", None)
+        if getattr(link, "fmt", "xlsx") == "csv":
+            content = export.build_csv(db, link.user_id)
+            return Response(
+                content=content, media_type="text/csv",
+                headers={"Content-Disposition":
+                         f'attachment; filename="courier-records-{today}.csv"'},
+            )
+        data = export.build_xlsx(db, link.user_id, db.get(User, link.user_id), ps, pe)
         return Response(
-            content=csv_text,
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            content=data,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition":
+                     f'attachment; filename="courier-record-pack-{today}.xlsx"'},
         )
     finally:
         db.close()
@@ -358,6 +392,8 @@ def export_csv(token: str):
 # --------------------------------------------------------------------------
 
 def handle_inbound(params: dict) -> None:
+    _ensure_started()  # make sure tables/columns exist no matter how we were launched
+    number = ""
     db = SessionLocal()
     try:
         from_field = params.get("From", "")            # "whatsapp:+447700900000"
@@ -425,7 +461,16 @@ def handle_inbound(params: dict) -> None:
 
         _handle_text(db, user, number, body)
     except Exception as exc:  # never let a background task die silently
+        import traceback
         print(f"[handle_inbound] error: {exc!r}")
+        traceback.print_exc()
+        db.rollback()
+        if number:
+            try:
+                wa.send_whatsapp(number, "Sorry, something went wrong on my side. "
+                                 "Please try that again in a moment.")
+            except Exception:
+                pass
     finally:
         db.close()
 
@@ -467,6 +512,9 @@ def _handle_onboarding(db, user, number, body) -> None:
         if low in ("3", "accept", "accept and continue", "agree", "continue", "start"):
             user.terms_version = TERMS_VERSION
             user.terms_accepted_at = now()
+            # Privacy Notice is shown for transparency at this point (not consent).
+            user.privacy_version = TERMS_VERSION
+            user.privacy_shown_at = now()
             user.onboarding_step = "ask_vehicle"
             db.commit()
             wa.send_whatsapp(number, TRUST)
@@ -993,20 +1041,29 @@ def _handle_text(db, user, number, body) -> None:
             wa.send_whatsapp(number, "Deleted. Send it again or type the correct value.")
         return
 
-    if low in ("csv", "export", "report"):
-        token = make_export_link(db, user.id)
-        note = ("\n\nNote: Receipt and screenshot images are not stored. Expenses "
-                "marked \"receipt OCR\" were read from an uploaded image and confirmed "
-                "by you — keep your original receipts if you need supporting evidence.")
-        if config.PUBLIC_BASE_URL:
-            wa.send_whatsapp(number, f"Your CSV (link valid 24h):\n"
-                             f"{config.PUBLIC_BASE_URL}/export/{token}{note}")
-        else:
-            wa.send_whatsapp(number, "Export link isn't configured yet (set PUBLIC_BASE_URL).")
+    # Flow G: standard export is an Excel record pack; CSV is a paid/pro option.
+    # Optional trailing period, e.g. "export last month" / "export 1 jun to 30 jun".
+    if low == "export" or low.startswith(("export ", "report", "excel", "record pack", "pack")):
+        rest = low.split(" ", 1)[1] if " " in low else ""
+        period = periods.resolve(rest) if rest else None
+        _send_excel_export(db, user, number, period)
         return
 
-    if low in ("summary", "total", "totals"):
-        wa.send_whatsapp(number, export.weekly_summary(db, user))
+    if low in ("csv", "csv export"):
+        wa.send_whatsapp(
+            number,
+            "CSV export is a paid/pro option.\n\n"
+            "CSV files are mainly for importing into accounting software, and "
+            "different platforms may need different formats.\n\n"
+            "The standard export is an Excel record pack (type EXPORT) — it has "
+            "separate tabs for income, mileage, expenses, review-only items and a "
+            "summary, ready to share with an accountant.")
+        return
+
+    if low == "summary" or low.startswith(("summary ", "total", "totals")):
+        rest = low.split(" ", 1)[1] if " " in low else ""
+        period = periods.resolve(rest) if rest else None
+        wa.send_whatsapp(number, export.summary(db, user, period))
         return
 
     if low in ("help", "hi", "hello", "start", "menu"):
@@ -1022,6 +1079,64 @@ def _handle_text(db, user, number, body) -> None:
             "If you are unsure, log the miles you believe were for delivery work and "
             "your accountant can review your records later.",
         )
+        return
+
+    # Flow J §11: human / support request.
+    if low in ("human", "agent", "support", "talk to someone", "talk to a human",
+               "speak to someone", "contact support"):
+        wa.send_whatsapp(
+            number,
+            "Support is limited while we're testing the service.\n\n"
+            "You can describe the issue here and we'll review it if support is "
+            "available.\n\n"
+            "For tax advice or filing questions, please speak to an accountant.")
+        return
+
+    # Flow J §9: "is this tax advice?" / "will this file my tax?"
+    if ("tax advice" in low or "file my tax" in low or "do my tax" in low
+            or "is this tax" in low):
+        wa.send_whatsapp(
+            number,
+            "No — this service doesn't file your tax return or give formal tax "
+            "advice.\n\n"
+            "It helps you organise your delivery-work records. You or your accountant "
+            "should review the records before filing.")
+        return
+
+    # Flow J §10: unsupported personal-tax questions.
+    if ("self assessment" in low or "self-assessment" in low or "tax return" in low
+            or ("claim" in low and ("rent" in low or "home" in low or "mortgage" in low
+                                    or "council tax" in low))):
+        wa.send_whatsapp(
+            number,
+            "I can't give formal tax advice or complete your tax return.\n\n"
+            "I can help organise your delivery-work records — mileage, earnings and "
+            "courier-related expenses.\n\n"
+            "For personal tax questions, please check with an accountant or HMRC "
+            "guidance.")
+        return
+
+    # Flow J §6/§7: petrol/vehicle-cost questions + simplified-mileage explanation.
+    if ("simplified mileage" in low or
+            (("petrol" in low or "fuel" in low or "insurance" in low or "repair" in low
+              or "servicing" in low or "mot" in low or "road tax" in low or "tyre" in low)
+             and ("?" in body or "can i" in low or "upload" in low or "add" in low
+                  or "what about" in low or "claim" in low))):
+        wa.send_whatsapp(
+            number,
+            "For vehicle costs, this service currently uses simplified mileage.\n\n"
+            "That means you track delivery miles instead of petrol, insurance, repair "
+            "or servicing receipts — so I don't collect vehicle running-cost receipts "
+            "as expense records.\n\n"
+            "You can log your delivery miles instead, for example:\n\n\"120 miles\"")
+        return
+
+    # Flow J §12: several different items in one message (mileage + earnings +
+    # expense). Only triggers when ≥2 distinct types are present; otherwise the
+    # normal split-mileage / multi-earnings handlers below take over.
+    multi = _detect_multi(body)
+    if multi:
+        _handle_multi(db, user, number, multi)
         return
 
     # Try to read it as a mileage entry. Handles single / split / monthly /
@@ -1061,7 +1176,7 @@ def _handle_text(db, user, number, body) -> None:
         _handle_earnings_entry(db, user, number, earnings)
         return
 
-    # Sounds like mileage but no number we could read (Flow B section 11).
+    # Sounds like mileage but no number we could read (Flow B §15 / Flow J §3).
     if any(w in low for w in ("mile", "drove", "drive", "driving", "rode", "cycled")):
         wa.send_whatsapp(
             number,
@@ -1071,7 +1186,86 @@ def _handle_text(db, user, number, body) -> None:
         )
         return
 
-    wa.send_whatsapp(number, HELP)
+    # Mentions earnings but no amount we could read (Flow J §4).
+    if (extract._find_platform(body)
+            or any(w in low for w in ("earn", "earned", "earning", "made", "took",
+                                      "income", "wage"))):
+        wa.send_whatsapp(
+            number,
+            "To log earnings, please send either:\n\n"
+            "• an earnings screenshot, or\n"
+            "• a message like \"Uber Eats £320\"\n\n"
+            "Which would you like to do?")
+        return
+
+    # Unknown message (Flow J §2): guide, don't judge.
+    wa.send_whatsapp(number, UNKNOWN)
+
+
+def _detect_multi(body: str):
+    """Flow J §12: split a message into items of different types. Returns a list of
+    (kind, data) only when ≥2 distinct types are present, else None."""
+    parts = [p for p in re.split(r"\s*,\s*", body.strip()) if p.strip()]
+    if len(parts) < 2:
+        return None
+    items = []
+    for p in parts:
+        m = extract.parse_mileage_text(p)
+        if m and m["kind"] == "single" and not m.get("too_high"):
+            items.append(("mileage", m))
+            continue
+        ex = extract.parse_expense_text(p)
+        if ex and not ex["amount_missing"]:
+            items.append(("expense", ex["entries"][0]))
+            continue
+        en = extract.parse_earnings_text(p)
+        if en and not en["platform_missing"]:
+            items.append(("earnings", en["entries"][0]))
+            continue
+        return None  # an unparseable segment — fall back to single-item handling
+    if len({k for k, _ in items}) < 2:
+        return None
+    return items
+
+
+def _handle_multi(db, user, number, items) -> None:
+    """Create a pending record for each parsed item and list them for confirmation."""
+    monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
+    ps, pe = _period_range(monthly)
+    pf = dict(period_start=ps.isoformat(), period_end=pe.isoformat(),
+              entry_frequency="monthly" if monthly else "weekly")
+    lines = ["I found multiple items:\n"]
+    for kind, data in items:
+        if kind == "mileage":
+            vt = data.get("vehicle_hint") or vehicle_settings.default_vehicle(user)
+            db.add(Record(user_id=user.id, record_type="mileage",
+                          record_date=extract._today(), category="mileage",
+                          miles=data["miles"], vehicle_type=vt,
+                          source_type=data["source_hint"], confidence=1.0,
+                          confirmation_status="pending", notes="Multi-item entry.", **pf))
+            lines.append(f"• Mileage: {data['miles']:.0f} miles")
+        elif kind == "earnings":
+            db.add(Record(user_id=user.id, record_type="income",
+                          record_date=extract._today(), category="platform_income",
+                          platform_or_vendor=(data["platform"] or "")[:64],
+                          amount=data["amount"], source_type="manual_entry",
+                          confidence=1.0, confirmation_status="pending",
+                          notes="Multi-item entry.", **pf))
+            lines.append(f"• Earnings: {data['platform']} £{data['amount']:.2f}")
+        else:  # expense
+            reason = _expense_review_reason(data["description"], data["category"])
+            db.add(Record(user_id=user.id, record_type="expense",
+                          record_date=extract._today(), category=data["category"],
+                          platform_or_vendor=data["description"][:64],
+                          amount=data["amount"], source_type="manual_entry",
+                          confidence=1.0,
+                          confirmation_status="pending_review" if reason else "pending",
+                          notes=(reason[1] if reason else "Multi-item entry."), **pf))
+            flag = "  (review-only)" if reason else ""
+            lines.append(f"• Expense: {data['description']} £{data['amount']:.2f}{flag}")
+    db.commit()
+    lines.append(f"\n{_OPTIONS_FOOTER}")
+    wa.send_whatsapp(number, "\n".join(lines))
 
 
 def _handle_mileage_entry(db, user, number, parsed: dict) -> None:
@@ -1613,6 +1807,35 @@ def _stored_period_line(period_start: str | None, period_end: str | None) -> str
         except ValueError:
             return None
     return None
+
+
+def _send_excel_export(db, user, number, period: dict | None = None) -> None:
+    """Flow G: build a standard Excel record-pack link. Defaults to the current
+    month; pass a `period` (from periods.resolve) for last month / tax year / custom."""
+    if period:
+        start, end = period["start"], period["end"]
+        lead = "Your record pack is ready."
+    else:
+        start, end = _period_range(True)  # current calendar month
+        lead = "Your monthly record pack is ready."
+    token = make_export_link(db, user.id, fmt="xlsx",
+                             period_start=start.isoformat(), period_end=end.isoformat())
+    intro = (
+        f"{lead}\n\n"
+        f"Period: {_fmt_period(start, end)}\n\n"
+        "The standard export is one Excel workbook with separate tabs for "
+        "assumptions, income, mileage, non-vehicle expenses, review-only items and "
+        "a summary.\n\n"
+        "It's a record pack for review by you or your accountant — not a completed "
+        "tax return.\n\n"
+        "CSV export is also available as a paid/pro option (type CSV)."
+    )
+    if config.PUBLIC_BASE_URL:
+        wa.send_whatsapp(number, f"{intro}\n\nDownload (link valid 24h):\n"
+                         f"{config.PUBLIC_BASE_URL}/export/{token}")
+    else:
+        wa.send_whatsapp(number, intro + "\n\n(Export link isn't configured yet — "
+                         "set PUBLIC_BASE_URL.)")
 
 
 def _mileage_prompt(miles: float, vehicle_type, user, updated: bool = False,
