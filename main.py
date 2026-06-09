@@ -966,7 +966,7 @@ def _handle_text(db, user, number, body) -> None:
         return
 
     if low in ("summary", "total", "totals"):
-        wa.send_whatsapp(number, export.weekly_summary(db, user))
+        wa.send_whatsapp(number, export.summary(db, user))
         return
 
     if low in ("help", "hi", "hello", "start", "menu"):
