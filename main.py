@@ -36,6 +36,17 @@ from models import (
 # The three delivery platforms offered as quick picks when one is unclear.
 _PLATFORM_CHOICES = ["Uber Eats", "Deliveroo", "Just Eat"]
 
+# Shown when someone tries to log a vehicle running cost as an expense.
+_VEHICLE_COST_MESSAGE = (
+    "That looks like a vehicle running cost (e.g. fuel, insurance, repairs, "
+    "servicing or tyres).\n\n"
+    "You're on the simplified-mileage method, so these are already covered by your "
+    "per-mile rate — they can't be claimed separately. I won't log it as an "
+    "expense.\n\n"
+    "Just keep sending your delivery miles and that's taken care of. "
+    "(Parking and tolls are fine to log separately.)"
+)
+
 app = FastAPI(title="Courier Tax & Records Assistant")
 
 WELCOME = (
@@ -376,13 +387,33 @@ def _handle_media(db, user, number, params, num_media) -> None:
             wa.send_whatsapp(number, "Sorry, I couldn't read that one. Try a clearer photo?")
             continue
 
-        # Mileage is typed-only — we don't read it from photos. If a photo looks
-        # like an odometer/mileage shot, ask the user to type it instead.
+        # Mileage photo: read the distance and confirm it (image not stored).
         if data["record_type"] == "mileage":
-            wa.send_whatsapp(
-                number,
-                "I read photos for earnings screenshots and expense receipts only.\n\n"
-                "For mileage, just type it, e.g. \"120 miles\".")
+            miles = data["miles"]
+            if not miles:
+                wa.send_whatsapp(
+                    number,
+                    "This looks like mileage but I couldn't read the number.\n\n"
+                    "Please type it, e.g. \"120 miles\".")
+                continue
+            vt = vehicle_settings.default_vehicle(user)
+            db.add(Record(
+                user_id=user.id, record_type="mileage", record_date=data["record_date"],
+                category="mileage", miles=miles, vehicle_type=vt,
+                source_type="odometer_photo", confidence=data["confidence"],
+                confirmation_status="pending", original_media_url="",
+                notes="Mileage read from a photo.",
+            ))
+            db.commit()
+            wa.send_whatsapp(number, _mileage_prompt(miles, vt, user))
+            continue
+
+        # Receipt for a vehicle running cost (fuel/insurance/repairs/etc.): under
+        # simplified mileage these are covered by the per-mile rate, so we don't
+        # log them as separate expenses.
+        if data["record_type"] == "expense" and \
+                extract.is_vehicle_running_cost(data["platform_or_vendor"], data["category"]):
+            wa.send_whatsapp(number, _VEHICLE_COST_MESSAGE)
             continue
 
         source = "screenshot" if data["record_type"] == "income" else "receipt_ocr"
@@ -1000,6 +1031,14 @@ def _handle_expense_entry(db, user, number, parsed: dict) -> None:
     is always no, so original_media_url stays empty)."""
     entries = parsed["entries"]
 
+    # Drop vehicle running costs — covered by simplified mileage, not separately
+    # claimable. If everything was a vehicle cost, just explain and stop.
+    rejected = [e for e in entries if extract.is_vehicle_running_cost(e["description"], e["category"])]
+    entries = [e for e in entries if e not in rejected]
+    if not entries:
+        wa.send_whatsapp(number, _VEHICLE_COST_MESSAGE)
+        return
+
     # Description given but no amount yet (Flow E1 §6) — ask for the amount.
     if parsed["amount_missing"]:
         e = entries[0]
@@ -1012,6 +1051,13 @@ def _handle_expense_entry(db, user, number, parsed: dict) -> None:
         db.commit()
         wa.send_whatsapp(number, f"How much was the {e['description'].lower()}?")
         return
+
+    if rejected:  # some items were vehicle costs we skipped
+        names = ", ".join(e["description"] for e in rejected)
+        wa.send_whatsapp(
+            number,
+            f"Note: I didn't log {names} — vehicle running costs are covered by your "
+            "simplified-mileage rate, so they can't be claimed separately.")
 
     for e in entries:
         db.add(Record(

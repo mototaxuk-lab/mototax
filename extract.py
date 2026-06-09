@@ -358,6 +358,27 @@ def guess_expense_category(description: str) -> str:
     return "review_required"
 
 
+# Vehicle running costs are covered by the simplified-mileage rate, so they must
+# NOT be logged as separate expenses. (Parking/tolls/congestion are allowable
+# separately and are deliberately excluded from this list.)
+_VEHICLE_COST_WORDS = (
+    "fuel", "petrol", "diesel", "unleaded", "shell", "esso", "texaco",
+    "insurance", "repair", "service", "servicing", "mot", "tyre", "tyres", "tire",
+    "garage", "mechanic", "clutch", "brake", "battery", "oil change", "road tax",
+    "vehicle tax", "car tax", "breakdown", "windscreen", "exhaust",
+)
+_VEHICLE_COST_CATEGORIES = ("fuel", "insurance", "repair")
+
+
+def is_vehicle_running_cost(description: str, category: str | None = None) -> bool:
+    """True if this is a vehicle running cost (not separately claimable under the
+    simplified-mileage method)."""
+    if (category or "").lower() in _VEHICLE_COST_CATEGORIES:
+        return True
+    t = f" {(description or '').lower()} "
+    return any(w in t for w in _VEHICLE_COST_WORDS)
+
+
 def _clean_description(text: str) -> str:
     """Strip amount tokens, currency words and filler, leaving the description."""
     t = _AMOUNT_GBP_RE.sub(" ", text)
