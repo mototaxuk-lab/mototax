@@ -237,6 +237,98 @@ def summary(db: Session, user: User) -> str:
     return "\n".join(lines)
 
 
+# --- Flow G: Excel record pack (standard export) -----------------------------
+
+def _records_for_export(db: Session, user_id: int, start: str | None, end: str | None):
+    rows = _exportable(db, user_id, include_review=True)
+    if start and end:
+        rows = [r for r in rows if start <= (r.record_date or "") <= end]
+    return rows
+
+
+def build_xlsx(db: Session, user_id: int, user: User | None = None,
+               start: str | None = None, end: str | None = None) -> bytes:
+    """Standard Flow G export: one workbook with the six required tabs."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    rows = _records_for_export(db, user_id, start, end)
+    income = [r for r in rows if r.record_type == "income"]
+    mileage = [r for r in rows if r.record_type == "mileage"]
+    expenses = [r for r in rows if r.record_type == "expense"
+                and r.confirmation_status != "review_required"]
+    review = [r for r in rows if r.confirmation_status == "review_required"]
+
+    wb = Workbook()
+    bold = Font(bold=True)
+
+    def sheet(name, headers, data_rows):
+        ws = wb.create_sheet(name)
+        ws.append(headers)
+        for c in ws[1]:
+            c.font = bold
+        for row in data_rows:
+            ws.append(row)
+        return ws
+
+    wb.remove(wb.active)  # drop default sheet
+
+    period = f"{start or 'all'} to {end or 'all'}"
+    rate = user.tax_rate if user else None
+    sheet("00_Assumptions", ["item", "value"], [
+        ["export_period", period],
+        ["method", "simplified mileage"],
+        ["tax_estimate_rate", f"{(rate or 0) * 100:.0f}%" if rate is not None else "n/a"],
+        ["note", "Record pack for review — not a completed tax return."],
+        ["note", "Review-only items are excluded from totals."],
+    ])
+
+    sheet("01_Income", ["period_start", "period_end", "entry_frequency", "platform",
+                        "amount_gbp", "source_type", "status", "confirmed_at"],
+          [[r.period_start or "", r.period_end or "", r.entry_frequency or "",
+            r.platform_or_vendor, f"{(r.amount or 0):.2f}", r.source_type,
+            r.confirmation_status, str(r.confirmed_at or "")] for r in income])
+
+    sheet("02_Mileage", ["period_start", "period_end", "entry_frequency", "vehicle_type",
+                         "miles", "mileage_rate_note", "calculated_deduction",
+                         "status", "confirmed_at"],
+          [[r.period_start or "", r.period_end or "", r.entry_frequency or "",
+            r.vehicle_type or "", f"{(r.miles or 0):.1f}", tax.label(r.vehicle_type),
+            f"{tax.mileage_deduction(r.miles or 0, r.vehicle_type):.2f}",
+            r.confirmation_status, str(r.confirmed_at or "")] for r in mileage])
+
+    sheet("03_NonVehicleExpenses", ["date", "description", "category_guess",
+                                    "amount_gbp", "source_type", "status", "confirmed_at"],
+          [[r.record_date, r.platform_or_vendor, r.category, f"{(r.amount or 0):.2f}",
+            r.source_type, r.confirmation_status, str(r.confirmed_at or "")]
+           for r in expenses])
+
+    sheet("04_ReviewOnly", ["date", "description", "amount_gbp", "reason_for_review",
+                            "included_in_total", "status"],
+          [[r.record_date, r.platform_or_vendor or r.category, f"{(r.amount or 0):.2f}",
+            r.notes, "no", r.confirmation_status] for r in review])
+
+    earnings_total = sum(r.amount or 0 for r in income)
+    by_vehicle = _miles_by_vehicle(mileage, user.vehicle_type if user else None)
+    miles_total = sum(by_vehicle.values())
+    deduction = sum(tax.mileage_deduction(m, vt) for vt, m in by_vehicle.items())
+    benefit = (deduction * rate) if rate else 0.0
+    expense_total = sum(r.amount or 0 for r in expenses)
+    sheet("05_Summary", ["item", "value"], [
+        ["export_period", period],
+        ["earnings_total", f"{earnings_total:.2f}"],
+        ["miles_total", f"{miles_total:.0f}"],
+        ["mileage_deduction_total", f"{deduction:.2f}"],
+        ["estimated_tax_benefit", f"{benefit:.2f}"],
+        ["expense_total_for_review_excluded", f"{expense_total:.2f}"],
+        ["review_only_count", str(len(review))],
+    ])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def earnings_summary(db: Session, user: User) -> str:
     """Flow D summary after confirming earnings: this-week totals per platform."""
     import datetime as dt
