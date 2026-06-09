@@ -99,11 +99,42 @@ BOUNDARY = (
     "reviewed by you or your accountant before filing."
 )
 
+TERMS_CHECK = (
+    "Before we start, please review our Terms and Privacy Notice.\n\n"
+    "They explain what the service does, what it does not do, and how your data is "
+    "used.\n\n"
+    "1. View Terms\n"
+    "2. View Privacy Notice\n"
+    "3. Accept and continue\n\n"
+    "Reply 3 to accept and continue (or 1 / 2 to read first)."
+)
+
+TERMS_SUMMARY = (
+    "Terms (summary):\n\n"
+    "• I help you organise delivery records — I don't file your tax return or give "
+    "formal tax advice.\n"
+    "• Figures are estimates for your review; you confirm everything before it's saved.\n"
+    "• Vehicle costs use the simplified-mileage method only.\n\n"
+    "Reply 3 to accept and continue."
+)
+
+PRIVACY_SUMMARY = (
+    "Privacy Notice (summary):\n\n"
+    "• I store only the records you confirm. Earnings screenshots and receipts are "
+    "never kept — I read them, then discard the image.\n"
+    "• Your data is used to build your summaries and export, nothing else.\n"
+    "• You can export or delete your data anytime from settings.\n\n"
+    "Reply 3 to accept and continue."
+)
+
 TRUST = (
     "You stay in control.\n\n"
     "Before anything is added to your records, you can confirm, edit or delete it.\n\n"
     "To set you up, I only need two quick answers."
 )
+
+# Bump when the Terms/Privacy copy changes so we can record what each user accepted.
+TERMS_VERSION = "2026-06"
 
 VEHICLE_QUESTION = (
     "Q1. What do you mainly use for deliveries?\n\n"
@@ -156,15 +187,26 @@ def tax_confirmation(rate: float) -> str:
 
 SETUP_COMPLETE = (
     "You're set up ✅\n\n"
-    "Every Sunday evening, I'll remind you to send your delivery miles.\n\n"
+    "By default, I'll remind you every Sunday evening to send your delivery miles.\n\n"
     "Example:\n"
     "\"120 miles\"\n\n"
-    "Add earnings screenshots or type your earnings if you want your real take-home "
-    "estimate.\n\n"
-    "Add courier-related expenses if you want them included in your record pack for "
-    "accountant review.\n\n"
-    "You can type SETTINGS anytime to change your vehicle type, tax estimate level or "
-    "reminder settings."
+    "You can also add earnings screenshots or type earnings manually.\n\n"
+    "Example:\n"
+    "\"Uber Eats £320\"\n\n"
+    "Default tracking is weekly, but you can change mileage or earnings input to "
+    "monthly in settings.\n\n"
+    "Type SETTINGS anytime to change your vehicle, tax estimate, reminder, or input "
+    "frequency."
+)
+
+HOW_IT_WORKS = (
+    "Here's how it works:\n\n"
+    "1. Send your delivery miles weekly or monthly.\n"
+    "2. Add earnings by screenshot or manual text.\n"
+    "3. Add courier-related expenses if needed.\n"
+    "4. Confirm, edit or delete before anything is saved.\n"
+    "5. Get summaries and export records when needed.\n\n"
+    "You can change weekly/monthly input in settings."
 )
 
 FREE_TRIAL = (
@@ -333,18 +375,12 @@ def handle_inbound(params: dict) -> None:
             db.commit()
             user, _ = get_or_create_user(db, number)
             wa.send_whatsapp(number, "🔄 Restarted. Starting from scratch.\n")
-            wa.send_whatsapp(number, WELCOME)
-            wa.send_whatsapp(number, BOUNDARY)
-            wa.send_whatsapp(number, TRUST)
-            wa.send_whatsapp(number, VEHICLE_QUESTION)
+            _start_onboarding(db, user, number)
             return
 
         if created:
-            # Brand-new user: explain the service, then ask the first question.
-            wa.send_whatsapp(number, WELCOME)
-            wa.send_whatsapp(number, BOUNDARY)
-            wa.send_whatsapp(number, TRUST)
-            wa.send_whatsapp(number, VEHICLE_QUESTION)
+            # Brand-new user: welcome → boundary → terms & privacy check.
+            _start_onboarding(db, user, number)
             return
 
         # Until onboarding is finished, every message is an onboarding answer.
@@ -363,15 +399,50 @@ def handle_inbound(params: dict) -> None:
         db.close()
 
 
+def _start_onboarding(db, user, number) -> None:
+    """Send welcome → boundary → terms check, and park at the terms step."""
+    user.onboarding_step = "ask_terms"
+    db.commit()
+    wa.send_whatsapp(number, WELCOME)
+    wa.send_whatsapp(number, BOUNDARY)
+    wa.send_whatsapp(number, TERMS_CHECK)
+
+
 def _handle_onboarding(db, user, number, body) -> None:
     low = body.strip().lower()
 
-    if low in ("what is this?", "what is this", "how does this work?", "how does this work"):
-        wa.send_whatsapp(number, WHAT_IS_THIS)
+    if low in ("what is this?", "what is this", "how does this work?",
+               "how does this work", "how it works"):
+        wa.send_whatsapp(number, HOW_IT_WORKS)
+        return
+
+    if low in ("cancel", "stop"):
+        wa.send_whatsapp(number, "No problem — onboarding paused. Type START when "
+                         "you're ready to finish setting up.")
         return
 
     if low in ("skip", "i'll do this later", "ill do this later", "later"):
         wa.send_whatsapp(number, SKIP_REPLY)
+        return
+
+    # Terms & Privacy gate — must accept before the two questions.
+    if user.onboarding_step == "ask_terms":
+        if low in ("1", "view terms", "terms"):
+            wa.send_whatsapp(number, TERMS_SUMMARY)
+            return
+        if low in ("2", "view privacy", "privacy", "privacy notice"):
+            wa.send_whatsapp(number, PRIVACY_SUMMARY)
+            return
+        if low in ("3", "accept", "accept and continue", "agree", "continue", "start"):
+            user.terms_version = TERMS_VERSION
+            user.terms_accepted_at = now()
+            user.onboarding_step = "ask_vehicle"
+            db.commit()
+            wa.send_whatsapp(number, TRUST)
+            wa.send_whatsapp(number, VEHICLE_QUESTION)
+            return
+        wa.send_whatsapp(number, "Please reply 3 to accept and continue (or 1 / 2 to "
+                         "read the Terms / Privacy Notice first).")
         return
 
     if low in ("start", "hi", "hello") and user.onboarding_step == "ask_vehicle":
@@ -696,6 +767,11 @@ def _handle_text(db, user, number, body) -> None:
 
     if low in ("vehicles", "my vehicles"):
         wa.send_whatsapp(number, export.vehicles_overview(db, user))
+        return
+
+    if low in ("how it works", "how does this work", "how does this work?", "what is this",
+               "what is this?"):
+        wa.send_whatsapp(number, HOW_IT_WORKS)
         return
 
     # Flow E3 §7/§10: eligibility questions — we don't approve or reject, just offer

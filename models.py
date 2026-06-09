@@ -65,6 +65,9 @@ class User(Base):
     # log_frequency: default period when a message doesn't say week/month.
     # "weekly" | "monthly". A per-message "this month"/"this week" still overrides.
     log_frequency: Mapped[str] = mapped_column(String(8), default="weekly")
+    # Terms & Privacy acceptance recorded during onboarding (Flow A).
+    terms_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    terms_accepted_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
     records: Mapped[list["Record"]] = relationship(back_populates="user")
 
@@ -133,6 +136,8 @@ _USER_ADDED_COLUMNS = {
     "settings_state": "VARCHAR(48)",
     "expecting": "VARCHAR(16)",
     "log_frequency": "VARCHAR(8) DEFAULT 'weekly'",
+    "terms_version": "VARCHAR(16)",
+    "terms_accepted_at": "TIMESTAMP",
 }
 _RECORD_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",
