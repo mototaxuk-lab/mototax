@@ -422,6 +422,12 @@ def _handle_media(db, user, number, params, num_media) -> None:
 def _handle_text(db, user, number, body) -> None:
     low = body.lower().strip()
 
+    # One-shot context hint: consume it now so it only affects this message.
+    expecting = user.expecting
+    if expecting:
+        user.expecting = None
+        db.commit()
+
     # If the user is mid-edit, the next message is the corrected value (or "cancel").
     editing = latest_editing(db, user.id)
     if editing:
@@ -542,6 +548,9 @@ def _handle_text(db, user, number, body) -> None:
         if has_income:
             wa.send_whatsapp(number, export.earnings_summary(db, user))
         elif has_mileage:
+            # We just asked for earnings, so read the next bare number as earnings.
+            user.expecting = "earnings"
+            db.commit()
             wa.send_whatsapp(
                 number,
                 "Confirmed ✅\n\n"
@@ -609,6 +618,15 @@ def _handle_text(db, user, number, body) -> None:
     # personal+delivery / vehicle-tagged inputs (see extract.parse_mileage_text).
     mileage = extract.parse_mileage_text(body)
     if mileage:
+        # If we just asked for earnings and they sent a bare number (no "miles"
+        # unit), treat it as earnings instead — that's what they meant.
+        if expecting == "earnings" and extract.is_bare_number(body):
+            _handle_earnings_entry(db, user, number, {
+                "kind": "single", "monthly": mileage.get("monthly", False),
+                "platform_missing": True,
+                "entries": [{"platform": None, "amount": mileage["miles"]}],
+            })
+            return
         _handle_mileage_entry(db, user, number, mileage)
         return
 

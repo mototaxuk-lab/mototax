@@ -158,6 +158,12 @@ def _base_record(miles: float, vehicle_hint: str | None, monthly: bool) -> dict:
     }
 
 
+def is_bare_number(body: str) -> bool:
+    """True if the message is just a number, with no unit or currency marker
+    (e.g. "320" but not "320 miles" or "£320"). Used to disambiguate by context."""
+    return bool(_BARE_NUMBER_RE.match(body))
+
+
 def parse_mileage_text(body: str) -> dict | None:
     """Rules-based mileage parse (no API). Handles the Flow B input shapes:
 

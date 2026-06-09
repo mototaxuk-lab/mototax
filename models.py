@@ -59,6 +59,9 @@ class User(Base):
     extra_vehicles: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # settings_state: where the user is in the settings menu (carries payload after ':')
     settings_state: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # expecting: one-shot hint for the next message ("earnings"), so a bare number
+    # is read as earnings when we just asked for them instead of as mileage.
+    expecting: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     records: Mapped[list["Record"]] = relationship(back_populates="user")
 
@@ -125,6 +128,7 @@ _USER_ADDED_COLUMNS = {
     "default_vehicle": "VARCHAR(16)",
     "extra_vehicles": "VARCHAR(64)",
     "settings_state": "VARCHAR(48)",
+    "expecting": "VARCHAR(16)",
 }
 _RECORD_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",
