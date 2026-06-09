@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#
+# Keep the README version badge + history table in sync with CHANGELOG.md.
+# Enabled via: scripts/install-hooks.sh  (sets core.hooksPath=.githooks)
+#
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+PY="$(command -v python3 || command -v python || true)"
+
+if [ -z "$PY" ]; then
+  echo "pre-push: python not found; skipping README version sync." >&2
+  exit 0
+fi
+
+set +e
+"$PY" "$ROOT/scripts/sync_readme_version.py"
+code=$?
+set -e
+
+case "$code" in
+  0)
+    exit 0  # README already in sync — allow the push
+    ;;
+  2)
+    echo ""
+    echo "✗ Push blocked: README version block was out of date with CHANGELOG.md."
+    echo "  It has now been updated for you. Commit it and push again:"
+    echo ""
+    echo "      git add README.md && git commit -m 'docs: sync README version' && git push"
+    echo ""
+    exit 1
+    ;;
+  *)
+    echo "pre-push: README version sync failed (exit $code). Fix CHANGELOG.md/markers and retry." >&2
+    exit 1
+    ;;
+esac
