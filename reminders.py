@@ -20,14 +20,37 @@ import twilio_client as wa
 from models import Record, SessionLocal, User, now
 
 
+def _period_line(monthly: bool) -> str:
+    d = dt.date.today()
+    if monthly:
+        start = d.replace(day=1)
+        nxt = (start.replace(year=start.year + 1, month=1) if start.month == 12
+               else start.replace(month=start.month + 1))
+        end = nxt - dt.timedelta(days=1)
+    else:
+        start = d - dt.timedelta(days=d.weekday())
+        end = start + dt.timedelta(days=6)
+    return f"Period: {start.day} {start:%b} – {end.day} {end:%b %Y}"
+
+
 def reminder_body(user: User) -> str:
-    """Weekly check-in reminder (Flow B section 1). The minimum action is just miles."""
+    """Mileage check-in reminder (Flow B §1/§2), weekly or monthly per the user."""
+    monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
+    if monthly:
+        return (
+            "Monthly mileage check-in 🔥\n\n"
+            "Send your delivery miles for this month.\n\n"
+            f"{_period_line(True)}\n\n"
+            "Example:\n\"520 miles\"\n\n"
+            "Weekly logging is usually fresher, but monthly is fine if that works "
+            "better for you."
+        )
     return (
         "Quick weekly check-in 🔥\n\n"
         "Send your delivery miles for this week.\n\n"
-        "Example:\n"
-        "\"120 miles\"\n\n"
-        "Add earnings screenshots or type your earnings if you want your real "
+        f"{_period_line(False)}\n\n"
+        "Example:\n\"120 miles\"\n\n"
+        "Add earnings screenshots or typed earnings if you want your real "
         "take-home estimate."
     )
 

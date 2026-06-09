@@ -81,6 +81,10 @@ class Record(Base):
     # record_type: income | expense | mileage
     record_type: Mapped[str] = mapped_column(String(16))
     record_date: Mapped[str] = mapped_column(String(10))  # ISO yyyy-mm-dd
+    # Period the entry covers (Flow B). ISO yyyy-mm-dd; entry_frequency weekly|monthly.
+    period_start: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    period_end: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    entry_frequency: Mapped[str | None] = mapped_column(String(8), nullable=True)
     platform_or_vendor: Mapped[str] = mapped_column(String(64), default="")
     category: Mapped[str] = mapped_column(String(32), default="")
 
@@ -141,6 +145,9 @@ _USER_ADDED_COLUMNS = {
 }
 _RECORD_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",
+    "period_start": "VARCHAR(10)",
+    "period_end": "VARCHAR(10)",
+    "entry_frequency": "VARCHAR(8)",
 }
 
 

@@ -13,8 +13,9 @@ import tax
 from models import Record, User
 
 CSV_COLUMNS = [
-    "date", "record_type", "vehicle_type", "platform_or_vendor", "amount_gbp", "miles",
-    "category", "source_type", "confirmation_status", "included_in_total", "confidence",
+    "date", "period_start", "period_end", "entry_frequency", "record_type",
+    "vehicle_type", "platform_or_vendor", "amount_gbp", "miles", "category",
+    "source_type", "confirmation_status", "included_in_total", "confidence",
     "original_file_reference", "notes",
 ]
 
@@ -53,7 +54,9 @@ def build_csv(db: Session, user_id: int) -> str:
     for r in rows:
         in_total = "no" if r.confirmation_status == "review_required" else "yes"
         writer.writerow([
-            r.record_date, r.record_type, r.vehicle_type or "", r.platform_or_vendor,
+            r.record_date, r.period_start or "", r.period_end or "",
+            r.entry_frequency or "", r.record_type, r.vehicle_type or "",
+            r.platform_or_vendor,
             f"{r.amount:.2f}" if r.amount is not None else "",
             f"{r.miles:.1f}" if r.miles is not None else "",
             r.category, r.source_type, r.confirmation_status, in_total,

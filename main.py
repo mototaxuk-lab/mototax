@@ -501,15 +501,19 @@ def _handle_media(db, user, number, params, num_media) -> None:
                     "Please type it, e.g. \"120 miles\".")
                 continue
             vt = vehicle_settings.default_vehicle(user)
+            monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
+            p_start, p_end = _period_range(monthly)
             db.add(Record(
                 user_id=user.id, record_type="mileage", record_date=data["record_date"],
                 category="mileage", miles=miles, vehicle_type=vt,
                 source_type="odometer_photo", confidence=data["confidence"],
                 confirmation_status="pending", original_media_url="",
                 notes="Mileage read from a photo.",
+                period_start=p_start.isoformat(), period_end=p_end.isoformat(),
+                entry_frequency="monthly" if monthly else "weekly",
             ))
             db.commit()
-            wa.send_whatsapp(number, _mileage_prompt(miles, vt, user))
+            wa.send_whatsapp(number, _mileage_prompt(miles, vt, user, monthly=monthly))
             continue
 
         source = "screenshot" if data["record_type"] == "income" else "receipt_ocr"
@@ -657,7 +661,9 @@ def _handle_text(db, user, number, body) -> None:
             awaiting.vehicle_type = chosen
             awaiting.confirmation_status = "pending"
             db.commit()
-            wa.send_whatsapp(number, _mileage_prompt(awaiting.miles or 0, chosen, user))
+            wa.send_whatsapp(number, _mileage_prompt(
+                awaiting.miles or 0, chosen, user,
+                monthly=(awaiting.entry_frequency == "monthly")))
             return
 
     # After "Other", the next message is the custom platform name (taken verbatim).
@@ -848,7 +854,8 @@ def _handle_text(db, user, number, body) -> None:
         if not pending:
             wa.send_whatsapp(number, "Nothing waiting to confirm. Send a photo or your mileage.")
             return
-        has_mileage = any(r.record_type == "mileage" for r in pending)
+        mileage_recs = [r for r in pending if r.record_type == "mileage"]
+        has_mileage = bool(mileage_recs)
         has_income = any(r.record_type == "income" for r in pending)
         has_review = any(r.confirmation_status == "pending_review" for r in pending)
         # Normal (counted) expense, distinct from review-only items.
@@ -891,13 +898,7 @@ def _handle_text(db, user, number, body) -> None:
             # We just asked for earnings, so read the next bare number as earnings.
             user.expecting = "earnings"
             db.commit()
-            wa.send_whatsapp(
-                number,
-                "Confirmed ✅\n\n"
-                "Your mileage record has been added for this week.\n\n"
-                "Add earnings screenshots or type your earnings if you want your real "
-                "take-home estimate.",
-            )
+            wa.send_whatsapp(number, _mileage_confirmed_summary(mileage_recs, user))
         else:
             wa.send_whatsapp(number, "Confirmed ✅ Saved.")
         return
@@ -1016,9 +1017,12 @@ def _handle_text(db, user, number, body) -> None:
 
 def _handle_mileage_entry(db, user, number, parsed: dict) -> None:
     """Create pending mileage record(s) from a parsed input and prompt to confirm."""
-    note_suffix = ""
-    if parsed.get("monthly"):
-        note_suffix = " (logged as monthly user-entered mileage)"
+    monthly = parsed.get("monthly", False)
+    p_start, p_end = _period_range(monthly)
+    freq = "monthly" if monthly else "weekly"
+    period_fields = dict(period_start=p_start.isoformat(), period_end=p_end.isoformat(),
+                         entry_frequency=freq)
+    note_suffix = " (logged as monthly user-entered mileage)" if monthly else ""
 
     # Split mileage: one pending record per vehicle, confirmed/deleted together.
     if parsed["kind"] == "split":
@@ -1030,12 +1034,12 @@ def _handle_mileage_entry(db, user, number, parsed: dict) -> None:
                 category="mileage", miles=seg["miles"], vehicle_type=vt,
                 source_type=parsed["source_hint"], confidence=parsed["confidence"],
                 confirmation_status="pending",
-                notes="User-entered split mileage." + note_suffix,
+                notes="User-entered split mileage." + note_suffix, **period_fields,
             )
             db.add(rec)
             rows.append((vt, seg["miles"]))
         db.commit()
-        wa.send_whatsapp(number, _split_prompt(rows, user))
+        wa.send_whatsapp(number, _split_prompt(rows, user, monthly))
         return
 
     # Single entry. Vehicle priority: explicit tag > prompt (multi-vehicle) > default.
@@ -1047,7 +1051,7 @@ def _handle_mileage_entry(db, user, number, parsed: dict) -> None:
         category="mileage", miles=parsed["miles"],
         vehicle_type=vehicle_hint or vehicle_settings.default_vehicle(user),
         source_type=parsed["source_hint"], confidence=parsed["confidence"],
-        notes=parsed["notes"] + note_suffix,
+        notes=parsed["notes"] + note_suffix, **period_fields,
     )
 
     # Multi-vehicle user with no explicit vehicle tag: ask which vehicle first.
@@ -1064,18 +1068,47 @@ def _handle_mileage_entry(db, user, number, parsed: dict) -> None:
     db.commit()
 
     prompt = _mileage_prompt(parsed["miles"], record.vehicle_type, user,
-                             monthly=parsed.get("monthly", False),
+                             monthly=monthly,
                              personal_excluded=parsed.get("personal_excluded"),
                              recommend_weekly=parsed.get("recommend_weekly", False))
     if high_warning:
-        prompt = (f"That looks unusually high for one week.\n"
-                  f"Did you mean {parsed['miles']:,.0f} delivery miles for this week?\n\n" + prompt)
+        prompt = (f"That looks unusually high for this period.\n"
+                  f"Did you mean {parsed['miles']:,.0f} delivery miles?\n"
+                  f"{_period_line(monthly)}\n\n" + prompt)
     wa.send_whatsapp(number, prompt)
 
 
-def _split_prompt(rows: list[tuple[str, float]], user) -> str:
+def _mileage_confirmed_summary(recs: list[Record], user) -> str:
+    """Flow B §21 summary shown after mileage is confirmed."""
+    period = ""
+    if recs and recs[0].period_start and recs[0].period_end:
+        try:
+            s = dt.date.fromisoformat(recs[0].period_start)
+            e = dt.date.fromisoformat(recs[0].period_end)
+            period = f"\n\nPeriod: {_fmt_period(s, e)}"
+        except ValueError:
+            pass
+    total_miles = sum(r.miles or 0 for r in recs)
+    total_ded = sum(tax.mileage_deduction(r.miles or 0, r.vehicle_type) for r in recs)
+    if len(recs) == 1:
+        veh = f"\nVehicle: {tax.label(recs[0].vehicle_type)}"
+    else:
+        veh = "\nVehicles: " + ", ".join(tax.label(r.vehicle_type) for r in recs)
+    msg = (
+        f"Mileage record added ✅{period}\n\n"
+        f"Miles logged: {total_miles:.0f}{veh}\n"
+        f"Mileage deduction captured: £{_money(total_ded)}"
+    )
+    if user.tax_rate:
+        benefit = tax.tax_benefit(total_ded, user.tax_rate)
+        msg += f"\nEstimated tax benefit: up to ~£{_money(benefit)}"
+    msg += "\n\nAdd earnings if you want your real take-home estimate."
+    return msg
+
+
+def _split_prompt(rows: list[tuple[str, float]], user, monthly: bool = False) -> str:
     """Confirmation text for a split-mileage entry (one line per vehicle)."""
-    lines = ["I logged split mileage for this week:\n"]
+    lines = ["I logged split mileage.\n", _period_line(monthly) + "\n"]
     total_miles = 0.0
     total_deduction = 0.0
     for vt, miles in rows:
@@ -1308,17 +1341,39 @@ def _money(value: float) -> str:
     return f"{value:.0f}" if abs(value - round(value)) < 0.005 else f"{value:.2f}"
 
 
+def _period_range(monthly: bool, ref: dt.date | None = None) -> tuple[dt.date, dt.date]:
+    """Start/end dates of the current week (Mon–Sun) or current month."""
+    d = ref or dt.date.today()
+    if monthly:
+        start = d.replace(day=1)
+        nxt = (start.replace(year=start.year + 1, month=1) if start.month == 12
+               else start.replace(month=start.month + 1))
+        return start, nxt - dt.timedelta(days=1)
+    start = d - dt.timedelta(days=d.weekday())  # Monday
+    return start, start + dt.timedelta(days=6)
+
+
+def _fmt_period(start: dt.date, end: dt.date) -> str:
+    return f"{start.day} {start:%b} – {end.day} {end:%b %Y}"
+
+
+def _period_line(monthly: bool) -> str:
+    start, end = _period_range(monthly)
+    return f"Period: {_fmt_period(start, end)}"
+
+
 def _mileage_prompt(miles: float, vehicle_type, user, updated: bool = False,
                     monthly: bool = False, personal_excluded: float | None = None,
                     recommend_weekly: bool = False) -> str:
     """Confirmation text for a mileage entry, with deduction + tax-benefit estimate."""
     deduction = tax.mileage_deduction(miles, vehicle_type)
-    period = "this month" if monthly else "this week"
     lead = "Updated to" if updated else "I logged"
     msg = (
-        f"{lead} {miles:.0f} delivery miles for {period} using your main vehicle: "
-        f"{tax.label(vehicle_type)}.\n\n"
-        f"Estimated mileage deduction: £{_money(deduction)}"
+        f"{lead} {miles:.0f} delivery miles.\n\n"
+        f"{_period_line(monthly)}\n"
+        f"Vehicle: {tax.label(vehicle_type)}"
+        + ("\nInput type: monthly" if monthly else "")
+        + f"\n\nEstimated mileage deduction: £{_money(deduction)}"
     )
     if personal_excluded:
         msg = (f"I'll log only the delivery-business miles.\n\n"
