@@ -7,12 +7,13 @@ mileage messages into a confirmed, tax-ready ledger and an accountant-ready CSV.
 Postgres · deploys on Railway from GitHub.
 
 <!-- VERSION:START — auto-generated from CHANGELOG.md by .githooks/pre-push; do not edit by hand -->
-![Version](https://img.shields.io/badge/version-0.4.0-blue) ![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-informational)
+![Version](https://img.shields.io/badge/version-0.5.0-blue) ![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-informational)
 
 ### Version history
 
 | Version | Date | Summary |
 |---------|------|---------|
+| **0.5.0** | 2026-06-09 | Richer mileage edit menu, and a fix so editing no longer loses the period. |
 | **0.4.0** | 2026-06-09 | Full product flows A–E. Brings `main` up to date with the complete onboarding/records feature set. (PR #7) |
 | **0.3.1** | 2026-06-03 | Local testing tooling and harness refinements. (PRs #3–#6) |
 | **0.3.0** | 2026-06-03 | Onboarding rewrite and a local testing harness. (PRs #1/#2) |
@@ -91,8 +92,8 @@ sandbox (and consider migrating to the Meta Cloud API to cut per-message cost).
 - **Evidence storage:** we keep Twilio's media URL as the reference. Twilio only
   retains media for a limited time, so before this is more than a prototype,
   copy each image to your own object storage (e.g. S3/R2) and store that URL.
-- **Edit flow** is intentionally simple (confirm or discard). A richer "reply 2
-  then send the correct amount" flow is an easy next step.
+- **Edit flow:** reply 2 to edit. Mileage records open a sub-menu to change the
+  mileage, vehicle, or period; other records take a corrected value directly.
 - **Scale:** processing runs in a FastAPI background task. At higher volume,
   move extraction to a real queue (e.g. Redis/RQ) so webhooks stay instant.
 - **Cost levers** to add next: prompt caching on the extraction system prompt,
