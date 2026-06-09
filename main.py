@@ -455,6 +455,9 @@ def _handle_onboarding(db, user, number, body) -> None:
         if low in ("3", "accept", "accept and continue", "agree", "continue", "start"):
             user.terms_version = TERMS_VERSION
             user.terms_accepted_at = now()
+            # Privacy Notice is shown for transparency at this point (not consent).
+            user.privacy_version = TERMS_VERSION
+            user.privacy_shown_at = now()
             user.onboarding_step = "ask_vehicle"
             db.commit()
             wa.send_whatsapp(number, TRUST)

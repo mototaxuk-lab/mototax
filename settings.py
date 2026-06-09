@@ -138,6 +138,7 @@ _MAIN_MENU = (
         "Account status",
         "Export or delete my data",
         "Help",
+        "Terms & privacy",
     ])
 )
 
@@ -239,8 +240,134 @@ def _h_menu(db, user, number, low, payload):
         wa.send_whatsapp(number, _HELP_MESSAGE)
         _go(user, None)
         db.commit()
+    elif choice in ("7", "terms & privacy", "terms and privacy", "terms", "privacy"):
+        _go(user, "terms_privacy")
+        db.commit()
+        wa.send_whatsapp(number, _TERMS_PRIVACY_MENU)
     else:
         wa.send_whatsapp(number, "Please reply with an option number.\n\n" + _MAIN_MENU)
+
+
+# --- Flow K: Terms & Privacy, data rights, support ---------------------------
+
+_TERMS_PRIVACY_MENU = (
+    "What would you like to view?\n\n"
+    + _numbered(["Terms summary", "Privacy summary", "Full Terms", "Full Privacy "
+                 "Notice", "Data rights", "Support", "Back"])
+)
+
+
+def _h_terms_privacy(db, user, number, low, payload):
+    import legal
+    if low in ("1", "terms summary", "terms"):
+        wa.send_whatsapp(number, legal.TERMS_SUMMARY)
+    elif low in ("2", "privacy summary", "privacy"):
+        user.privacy_version = legal.PRIVACY_VERSION
+        from models import now as _now
+        user.privacy_shown_at = _now()
+        db.commit()
+        wa.send_whatsapp(number, legal.PRIVACY_SUMMARY)
+    elif low in ("3", "full terms", "full terms ", "terms full"):
+        wa.send_whatsapp(number, legal.TERMS_FULL)
+    elif low in ("4", "full privacy notice", "full privacy", "privacy full"):
+        user.privacy_version = legal.PRIVACY_VERSION
+        from models import now as _now
+        user.privacy_shown_at = _now()
+        db.commit()
+        wa.send_whatsapp(number, legal.PRIVACY_FULL)
+    elif low in ("5", "data rights", "rights"):
+        _go(user, "data_rights")
+        db.commit()
+        wa.send_whatsapp(number, _DATA_RIGHTS_MENU)
+        return
+    elif low in ("6", "support"):
+        _go(user, "support")
+        db.commit()
+        wa.send_whatsapp(number, _SUPPORT_MENU)
+        return
+    elif low in ("7", "back", "cancel"):
+        _back_to_menu(db, user, number)
+        return
+    else:
+        wa.send_whatsapp(number, "Please reply with an option number.\n\n"
+                         + _TERMS_PRIVACY_MENU)
+        return
+    # After showing a document, re-offer the menu.
+    wa.send_whatsapp(number, _TERMS_PRIVACY_MENU)
+
+
+_DATA_RIGHTS_MENU = (
+    "You can request to export, correct or delete your data.\n\n"
+    "What would you like to do?\n\n"
+    + _numbered(["Export my data", "Correct my data", "Delete my data", "Support",
+                 "Back"])
+)
+
+
+def _h_data_rights(db, user, number, low, payload):
+    if low in ("1", "export my data", "export"):
+        _data_download(db, user, number)
+        _back_to_menu(db, user, number)
+    elif low in ("2", "correct my data", "correct"):
+        wa.send_whatsapp(
+            number,
+            "To correct records: change your vehicle or tax estimate in SETTINGS, or "
+            "re-send a corrected entry (e.g. \"115 miles\") and confirm it. Past "
+            "confirmed records aren't changed automatically.")
+        wa.send_whatsapp(number, _DATA_RIGHTS_MENU)
+    elif low in ("3", "delete my data", "delete"):
+        _go(user, "delete_confirm")
+        db.commit()
+        wa.send_whatsapp(
+            number,
+            "Delete your stored records?\n\nThis will remove your confirmed records "
+            "and settings from the service.\n\nSome limited information may be kept "
+            "for legal, security, accounting or technical reasons.\n\n"
+            + _numbered(["Confirm delete", "Cancel"]))
+    elif low in ("4", "support"):
+        _go(user, "support")
+        db.commit()
+        wa.send_whatsapp(number, _SUPPORT_MENU)
+    elif low in ("5", "back", "cancel"):
+        _go(user, "terms_privacy")
+        db.commit()
+        wa.send_whatsapp(number, _TERMS_PRIVACY_MENU)
+    else:
+        wa.send_whatsapp(number, "Please reply with an option number.\n\n"
+                         + _DATA_RIGHTS_MENU)
+
+
+_SUPPORT_MENU = (
+    "You can get support through the service.\n\n"
+    "Support is limited while we're testing — choose what you need help with and "
+    "we'll guide you. (For tax advice or filing, please speak to an accountant.)\n\n"
+    + _numbered(["Terms help", "Privacy help", "Data request help", "Back"])
+)
+
+
+def _h_support(db, user, number, low, payload):
+    if low in ("1", "terms help"):
+        wa.send_whatsapp(number, "Terms help: the service organises your records "
+                         "but doesn't file your tax or give tax advice. Reply 7 in "
+                         "Terms & privacy for the full Terms.")
+        wa.send_whatsapp(number, _SUPPORT_MENU)
+    elif low in ("2", "privacy help"):
+        wa.send_whatsapp(number, "Privacy help: we save only confirmed records; "
+                         "earnings screenshots and receipts aren't stored. You can "
+                         "export or delete your data anytime from Data rights.")
+        wa.send_whatsapp(number, _SUPPORT_MENU)
+    elif low in ("3", "data request help"):
+        wa.send_whatsapp(number, "Data request help: use Data rights to export or "
+                         "delete your records. Deletion may keep limited info for "
+                         "legal/technical reasons.")
+        wa.send_whatsapp(number, _SUPPORT_MENU)
+    elif low in ("4", "back", "cancel"):
+        _go(user, "terms_privacy")
+        db.commit()
+        wa.send_whatsapp(number, _TERMS_PRIVACY_MENU)
+    else:
+        wa.send_whatsapp(number, "Please reply with an option number.\n\n"
+                         + _SUPPORT_MENU)
 
 
 _HELP_MESSAGE = (
@@ -755,6 +882,9 @@ _STATES = {
     "account": _h_account,
     "payment": _h_payment,
     "cancel_confirm": _h_cancel_confirm,
+    "terms_privacy": _h_terms_privacy,
+    "data_rights": _h_data_rights,
+    "support": _h_support,
     "vehicle": _h_vehicle,
     "add": _h_add,
     "added": _h_added,
@@ -799,6 +929,19 @@ def _nl_intent(db, user, number, low) -> bool:
         _go(user, "payment")
         db.commit()
         wa.send_whatsapp(number, _payment_message(user))
+        return True
+
+    # Flow K: terms / privacy / data rights from anywhere.
+    if low in ("terms", "view terms", "terms and conditions", "full terms",
+               "privacy", "privacy notice", "view privacy", "full privacy"):
+        _go(user, "terms_privacy")
+        db.commit()
+        wa.send_whatsapp(number, _TERMS_PRIVACY_MENU)
+        return True
+    if low in ("data rights", "my rights", "my data rights", "gdpr"):
+        _go(user, "data_rights")
+        db.commit()
+        wa.send_whatsapp(number, _DATA_RIGHTS_MENU)
         return True
 
     # "download my records" → Excel pack link.
