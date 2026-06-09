@@ -247,7 +247,12 @@ _PLATFORMS = [
 _EARN_KEYWORDS = ("earn", "earning", "made", "took", "income", "wage", "wages", "pay", "payout")
 
 _AMOUNT_GBP_RE = re.compile(r"£\s*(\d+(?:\.\d{1,2})?)")
+# A number followed by a written currency word: "320 pounds", "320quid", "320p".
+_AMOUNT_WORD_RE = re.compile(r"(\d+(?:\.\d{1,2})?)\s*(?:pounds|pound|quid|gbp|p)\b",
+                             re.IGNORECASE)
 _AMOUNT_ANY_RE = re.compile(r"(\d+(?:\.\d{1,2})?)")
+# Currency markers that make a bare number read as money rather than mileage.
+_CURRENCY_WORDS = ("pound", "quid", "gbp")
 
 
 def _find_platform(text: str) -> str | None:
@@ -259,7 +264,7 @@ def _find_platform(text: str) -> str | None:
 
 
 def _find_amount(text: str, require_symbol: bool) -> float | None:
-    m = _AMOUNT_GBP_RE.search(text)
+    m = _AMOUNT_GBP_RE.search(text) or _AMOUNT_WORD_RE.search(text)
     if m:
         return float(m.group(1))
     if require_symbol:
@@ -297,10 +302,11 @@ def parse_earnings_text(body: str) -> dict | None:
         return None
 
     has_platform = any(e["platform"] for e in entries)
-    has_symbol = "£" in body
-    # Only treat as earnings if there's a platform, a £ sign, or an earnings word —
-    # otherwise a bare number is mileage, not income.
-    if not (has_platform or has_symbol or has_keyword):
+    has_money = "£" in body or any(w in low for w in _CURRENCY_WORDS) \
+        or bool(_AMOUNT_WORD_RE.search(body))
+    # Only treat as earnings if there's a platform, a money marker (£ / "pounds"),
+    # or an earnings word — otherwise a bare number is mileage, not income.
+    if not (has_platform or has_money or has_keyword):
         return None
 
     # For multi-entry, keep only the segments that actually name a platform.
