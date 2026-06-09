@@ -14,16 +14,21 @@ from models import Record, User
 
 CSV_COLUMNS = [
     "date", "record_type", "vehicle_type", "platform_or_vendor", "amount_gbp", "miles",
-    "category", "source_type", "confirmation_status", "confidence",
+    "category", "source_type", "confirmation_status", "included_in_total", "confidence",
     "original_file_reference", "notes",
 ]
 
 
-def _exportable(db: Session, user_id: int) -> list[Record]:
+def _exportable(db: Session, user_id: int, include_review: bool = False) -> list[Record]:
+    """Records that count toward totals (confirmed/estimated). Pass include_review
+    to also return review-only items — they belong in the export but NOT in totals."""
+    statuses = ["confirmed", "estimated"]
+    if include_review:
+        statuses.append("review_required")
     return (
         db.query(Record)
         .filter(Record.user_id == user_id,
-                Record.confirmation_status.in_(["confirmed", "estimated"]))
+                Record.confirmation_status.in_(statuses))
         .order_by(Record.record_date.asc(), Record.id.asc())
         .all()
     )
@@ -41,16 +46,17 @@ def _miles_by_vehicle(rows: list[Record], default_type: str | None) -> dict[str,
 
 
 def build_csv(db: Session, user_id: int) -> str:
-    rows = _exportable(db, user_id)
+    rows = _exportable(db, user_id, include_review=True)
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(CSV_COLUMNS)
     for r in rows:
+        in_total = "no" if r.confirmation_status == "review_required" else "yes"
         writer.writerow([
             r.record_date, r.record_type, r.vehicle_type or "", r.platform_or_vendor,
             f"{r.amount:.2f}" if r.amount is not None else "",
             f"{r.miles:.1f}" if r.miles is not None else "",
-            r.category, r.source_type, r.confirmation_status,
+            r.category, r.source_type, r.confirmation_status, in_total,
             f"{r.confidence:.2f}", r.original_media_url, r.notes,
         ])
     return buf.getvalue()

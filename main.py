@@ -36,19 +36,49 @@ from models import (
 # The three delivery platforms offered as quick picks when one is unclear.
 _PLATFORM_CHOICES = ["Uber Eats", "Deliveroo", "Just Eat"]
 
-def _vehicle_cost_warning(item: str = "") -> str:
-    """Heads-up shown when an expense looks like a vehicle running cost. We don't
-    block it — the user can confirm to log it anyway."""
-    what = item.strip() or "this"
-    return (
-        f"⚠️ Heads up: {what} looks like a vehicle running cost (fuel, insurance, "
-        "repairs, servicing, tyres, etc.).\n\n"
-        "On the simplified-mileage method these are already covered by your per-mile "
-        "rate, so they're normally not logged separately. (Parking and tolls are "
-        "fine to log separately.)\n\n"
-        "If it's a genuinely separate cost you still want recorded, confirm below — "
-        "otherwise delete it."
-    )
+# Footer for Flow E3 review items: confirming saves as review-only (not a total).
+_REVIEW_FOOTER = "Reply 1 to save as review-only, 2 to edit, or 3 to delete."
+
+
+def _expense_review_reason(description: str, category: str | None = None):
+    """Return (kind, reason) if an expense should be review-only, else None.
+    kind drives the warning copy; reason is stored for the accountant."""
+    if extract.is_vehicle_running_cost(description, category):
+        return ("vehicle", "vehicle running cost while simplified mileage selected")
+    if extract.is_personal_expense(description):
+        return ("personal", "appears personal / requires accountant review")
+    if extract.is_unclear_expense(description):
+        return ("unclear", "unclear description")
+    return None
+
+
+def _review_warning(kind: str, description: str, amount: float | None) -> str:
+    """Flow E3 warning shown before saving a review-only item."""
+    line = f"\n\n{description} — £{amount:.2f}\n" if amount is not None else "\n"
+    if kind == "vehicle":
+        head = (
+            "This looks like a vehicle running cost.\n\n"
+            "Because you're using simplified mileage, vehicle running costs such as "
+            "petrol, insurance, repairs, servicing, MOT, road tax and tyres are "
+            "usually covered by your mileage rate.\n\n"
+            "This item won't be included in your expense total."
+            f"{line}\n"
+            "Do you still want to save it as a review-only item for your accountant?\n"
+            "(Type SETTINGS to see your mileage method.)")
+    elif kind == "personal":
+        head = (
+            "This looks like it may be personal.\n\n"
+            "I can delete it, or save it as a review-only item. Review-only items "
+            "aren't included in your expense total unless reviewed later."
+            f"{line}")
+    else:  # unclear
+        head = (
+            "This expense description is unclear.\n\n"
+            "I can save it for accountant review, or you can edit it to make it "
+            "clearer.\n\n"
+            "Example:\n\"Phone mount £12\"\n\"Delivery bag £45\""
+            f"{line}")
+    return f"{head}\n{_REVIEW_FOOTER}"
 
 app = FastAPI(title="Courier Tax & Records Assistant")
 
@@ -459,12 +489,19 @@ def _handle_media(db, user, number, params, num_media) -> None:
             wa.send_whatsapp(number, _platform_picker(
                 "I can read the earnings amount, but I'm not sure which platform this "
                 "is from.\n\nWhich platform is this?"))
+        elif data["record_type"] == "expense":
+            # Flow E3: vehicle-cost / personal / unclear → save as review-only.
+            reason = _expense_review_reason(data["platform_or_vendor"], data["category"])
+            if reason:
+                record.confirmation_status = "pending_review"
+                record.notes = reason[1]
+                db.commit()
+                wa.send_whatsapp(number, _review_warning(
+                    reason[0], data["platform_or_vendor"] or "This item", data["amount"]))
+            else:
+                wa.send_whatsapp(number, _confirmation_prompt(data, user))
         else:
-            prompt = _confirmation_prompt(data, user)
-            if data["record_type"] == "expense" and \
-                    extract.is_vehicle_running_cost(data["platform_or_vendor"], data["category"]):
-                prompt = _vehicle_cost_warning(data["platform_or_vendor"]) + "\n\n" + prompt
-            wa.send_whatsapp(number, prompt)
+            wa.send_whatsapp(number, _confirmation_prompt(data, user))
 
 
 def _resolve_monthly(user, body: str) -> bool:
@@ -601,9 +638,17 @@ def _handle_text(db, user, number, body) -> None:
                                  "Send it like \"£45\".")
                 return
             awaiting_exp_amt.amount = amount
-            awaiting_exp_amt.confirmation_status = "pending"
-            db.commit()
-            wa.send_whatsapp(number, _expense_prompt(awaiting_exp_amt.platform_or_vendor, amount))
+            desc = awaiting_exp_amt.platform_or_vendor
+            reason = _expense_review_reason(desc, awaiting_exp_amt.category)
+            if reason:  # Flow E3: review-only item
+                awaiting_exp_amt.confirmation_status = "pending_review"
+                awaiting_exp_amt.notes = reason[1]
+                db.commit()
+                wa.send_whatsapp(number, _review_warning(reason[0], desc, amount))
+            else:
+                awaiting_exp_amt.confirmation_status = "pending"
+                db.commit()
+                wa.send_whatsapp(number, _expense_prompt(desc, amount))
             return
 
     # If an income entry is waiting for its platform (Flow D), this is the answer.
@@ -651,6 +696,18 @@ def _handle_text(db, user, number, body) -> None:
 
     if low in ("vehicles", "my vehicles"):
         wa.send_whatsapp(number, export.vehicles_overview(db, user))
+        return
+
+    # Flow E3 §7/§10: eligibility questions — we don't approve or reject, just offer
+    # to save for review. (Catches "can I claim …?", "is … deductible/allowable?")
+    if ("claim" in low or "deductible" in low or "allowable" in low or "tax deduct" in low) \
+            and ("can i" in low or "could i" in low or "is " in low or "?" in body):
+        wa.send_whatsapp(
+            number,
+            "I can help organise your records, but I don't approve expenses or give "
+            "formal tax advice.\n\n"
+            "I can save the item for accountant review if you want — just send it "
+            "like \"Phone mount £12\".")
         return
 
     if low in ("expense", "expenses", "add expense", "add expenses"):
@@ -717,17 +774,31 @@ def _handle_text(db, user, number, body) -> None:
             return
         has_mileage = any(r.record_type == "mileage" for r in pending)
         has_income = any(r.record_type == "income" for r in pending)
-        has_expense = any(r.record_type == "expense" for r in pending)
+        has_review = any(r.confirmation_status == "pending_review" for r in pending)
+        # Normal (counted) expense, distinct from review-only items.
+        has_expense = any(r.record_type == "expense"
+                          and r.confirmation_status == "pending" for r in pending)
         # Receipt-sourced expense → add the Flow E2 "image not stored" reassurance.
         from_receipt = any(r.record_type == "expense" and r.source_type == "receipt_ocr"
-                           for r in pending)
+                           and r.confirmation_status == "pending" for r in pending)
         for rec in pending:
-            rec.confirmation_status = "estimated" if rec.source_type == "user_estimate" else "confirmed"
+            if rec.confirmation_status == "pending_review":
+                rec.confirmation_status = "review_required"  # saved, excluded from totals
+            elif rec.source_type == "user_estimate":
+                rec.confirmation_status = "estimated"
+            else:
+                rec.confirmation_status = "confirmed"
             rec.confirmed_at = now()
             # We never retain raw screenshots/receipts — only the confirmed figures.
             if rec.record_type in ("income", "expense"):
                 rec.original_media_url = ""
         db.commit()
+        if has_review:
+            wa.send_whatsapp(
+                number,
+                "Saved for review ✅\n\nThis item is saved as review-only — it will "
+                "appear in the review section for your accountant and is not included "
+                "in your expense total.")
         if has_income:
             wa.send_whatsapp(number, export.earnings_summary(db, user))
         elif has_expense:
@@ -738,6 +809,8 @@ def _handle_text(db, user, number, body) -> None:
                     "The receipt image was not stored. Please keep the original "
                     "receipt yourself if you need supporting evidence.")
             wa.send_whatsapp(number, export.expense_summary(db, user))
+        elif has_review:
+            pass  # review message already sent
         elif has_mileage:
             # We just asked for earnings, so read the next bare number as earnings.
             user.expecting = "earnings"
@@ -1050,12 +1123,8 @@ def _handle_expense_entry(db, user, number, parsed: dict) -> None:
     is always no, so original_media_url stays empty)."""
     entries = parsed["entries"]
 
-    # Vehicle running costs aren't blocked — but we warn the user that simplified
-    # mileage already covers them, so they can decide whether to log anyway.
-    vehicle_costs = [e for e in entries
-                     if extract.is_vehicle_running_cost(e["description"], e["category"])]
-
     # Description given but no amount yet (Flow E1 §6) — ask for the amount.
+    # (Review-only classification happens once we know the amount.)
     if parsed["amount_missing"]:
         e = entries[0]
         db.add(Record(
@@ -1065,36 +1134,53 @@ def _handle_expense_entry(db, user, number, parsed: dict) -> None:
             confirmation_status="awaiting_expense_amount", notes="Typed expense.",
         ))
         db.commit()
-        if vehicle_costs:
-            wa.send_whatsapp(number, _vehicle_cost_warning(e["description"]))
         wa.send_whatsapp(number, f"How much was the {e['description'].lower()}?")
         return
 
-    if vehicle_costs:
-        names = ", ".join(e["description"] for e in vehicle_costs)
-        wa.send_whatsapp(number, _vehicle_cost_warning(names))
-
-    for e in entries:
+    # Single entry: vehicle-cost / personal / unclear → review-only (Flow E3).
+    if parsed["kind"] != "multi":
+        e = entries[0]
+        reason = _expense_review_reason(e["description"], e["category"])
+        status = "pending_review" if reason else "pending"
         db.add(Record(
             user_id=user.id, record_type="expense", record_date=extract._today(),
             category=e["category"], platform_or_vendor=e["description"][:64],
             amount=e["amount"], source_type="manual_entry", confidence=1.0,
-            confirmation_status="pending", notes="Typed expense.",
+            confirmation_status=status, notes=(reason[1] if reason else "Typed expense."),
+        ))
+        db.commit()
+        if reason:
+            wa.send_whatsapp(number, _review_warning(reason[0], e["description"], e["amount"]))
+        else:
+            wa.send_whatsapp(number, _expense_prompt(e["description"], e["amount"]))
+        return
+
+    # Multiple expenses: mark each review-only item, log the rest normally.
+    review_names = []
+    for e in entries:
+        reason = _expense_review_reason(e["description"], e["category"])
+        if reason:
+            review_names.append(e["description"])
+        db.add(Record(
+            user_id=user.id, record_type="expense", record_date=extract._today(),
+            category=e["category"], platform_or_vendor=e["description"][:64],
+            amount=e["amount"], source_type="manual_entry", confidence=1.0,
+            confirmation_status="pending_review" if reason else "pending",
+            notes=(reason[1] if reason else "Typed expense."),
         ))
     db.commit()
-
-    if parsed["kind"] == "multi":
-        lines = ["I logged these expenses for accountant review:\n"]
-        total = 0.0
-        for e in entries:
-            total += e["amount"]
-            lines.append(f"{e['description']}: £{e['amount']:.2f}")
-        lines.append(f"\nTotal expenses logged: £{total:.2f}")
-        lines.append(f"\nConfirm?\n{_OPTIONS_FOOTER}")
-        wa.send_whatsapp(number, "\n".join(lines))
-    else:
-        e = entries[0]
-        wa.send_whatsapp(number, _expense_prompt(e["description"], e["amount"]))
+    lines = ["I logged these expenses for accountant review:\n"]
+    total = 0.0
+    for e in entries:
+        flag = "  (review-only)" if e["description"] in review_names else ""
+        total += e["amount"]
+        lines.append(f"{e['description']}: £{e['amount']:.2f}{flag}")
+    lines.append(f"\nTotal expenses logged: £{total:.2f}")
+    if review_names:
+        lines.append("Review-only items aren't included in the total — they're saved "
+                     "for your accountant to review.")
+    lines.append(f"\nConfirm?\n{_OPTIONS_FOOTER}")
+    wa.send_whatsapp(number, "\n".join(lines))
 
 
 def _expense_prompt(description: str, amount: float, updated: bool = False) -> str:
@@ -1173,10 +1259,11 @@ def _mileage_prompt(miles: float, vehicle_type, user, updated: bool = False,
 
 
 def _all_pending(db, user_id: int) -> list[Record]:
-    """All records currently awaiting confirmation (a split creates several)."""
+    """All records awaiting confirmation, including review-only ones (Flow E3)."""
     return (
         db.query(Record)
-        .filter_by(user_id=user_id, confirmation_status="pending")
+        .filter(Record.user_id == user_id,
+                Record.confirmation_status.in_(["pending", "pending_review"]))
         .order_by(Record.created_at.asc())
         .all()
     )

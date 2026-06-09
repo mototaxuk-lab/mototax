@@ -379,6 +379,31 @@ def is_vehicle_running_cost(description: str, category: str | None = None) -> bo
     return any(w in t for w in _VEHICLE_COST_WORDS)
 
 
+# Looks personal (probably not a business expense) — flagged for review, not blocked.
+_PERSONAL_WORDS = (
+    "dinner", "lunch", "breakfast", "friend", "friends", "family", "holiday",
+    "grocery", "groceries", "cinema", "movie", "drinks", "pub", "beer", "wine",
+    "gift", "present", "haircut", "date night", "netflix", "spotify", "gym",
+    "clothes", "clothing", "shopping", "takeaway",
+)
+
+# Too vague to categorise — flagged as unclear for review.
+_UNCLEAR_WORDS = (
+    "stuff", "something", "things", "thing", "bits", "misc", "miscellaneous",
+    "sundry", "general", "bits and bobs",
+)
+
+
+def is_personal_expense(description: str) -> bool:
+    t = f" {(description or '').lower()} "
+    return any(w in t for w in _PERSONAL_WORDS)
+
+
+def is_unclear_expense(description: str) -> bool:
+    t = f" {(description or '').lower()} "
+    return any(w in t for w in _UNCLEAR_WORDS)
+
+
 def _clean_description(text: str) -> str:
     """Strip amount tokens, currency words and filler, leaving the description."""
     t = _AMOUNT_GBP_RE.sub(" ", text)
