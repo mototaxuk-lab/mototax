@@ -478,22 +478,51 @@ def _handle_text(db, user, number, body) -> None:
             wa.send_whatsapp(number, _mileage_prompt(awaiting.miles or 0, chosen, user))
             return
 
+    # After "Other", the next message is the custom platform name (taken verbatim).
+    awaiting_plat_text = (
+        db.query(Record)
+        .filter_by(user_id=user.id, confirmation_status="awaiting_platform_text")
+        .order_by(Record.created_at.desc())
+        .first()
+    )
+    if awaiting_plat_text:
+        if low in ("cancel", "stop", "delete"):
+            awaiting_plat_text.confirmation_status = "rejected"
+            db.commit()
+            wa.send_whatsapp(number, "Deleted.\n\nNo earnings record was saved.")
+            return
+        awaiting_plat_text.platform_or_vendor = body.strip()[:64]
+        awaiting_plat_text.confirmation_status = "pending"
+        db.commit()
+        wa.send_whatsapp(number, _income_prompt(awaiting_plat_text, user))
+        return
+
     # If an income entry is waiting for its platform (Flow D), this is the answer.
+    # Picker numbering: 1..N platforms, N+1 = Other, N+2 = Delete.
     awaiting_plat = latest_awaiting_platform(db, user.id)
     if awaiting_plat:
-        if low in ("cancel", "stop", "delete", "3"):
+        n = len(_PLATFORM_CHOICES)
+        other_num, delete_num = str(n + 1), str(n + 2)
+        if low in ("cancel", "stop", "delete", delete_num):
             awaiting_plat.confirmation_status = "rejected"
             db.commit()
-            wa.send_whatsapp(number, "Deleted.\n\nNo earnings record or screenshot was saved.")
+            wa.send_whatsapp(number, "Deleted.\n\nNo earnings record was saved.")
             return
         platform = None
-        if low.isdigit() and 1 <= int(low) <= len(_PLATFORM_CHOICES):
+        if low.isdigit() and 1 <= int(low) <= n:
             platform = _PLATFORM_CHOICES[int(low) - 1]
-        elif low in ("4", "other"):
+        elif low in (other_num, "other"):
+            awaiting_plat.confirmation_status = "awaiting_platform_text"
+            db.commit()
             wa.send_whatsapp(number, "Please type the platform name.")
             return
         else:
-            platform = extract._find_platform(body) or body.strip().title()
+            platform = extract._find_platform(body)
+            if platform is None:
+                # Unrecognised reply — re-show the picker rather than guess.
+                wa.send_whatsapp(number, _platform_picker(
+                    "Sorry, I didn't catch that. Which platform was this from?"))
+                return
         awaiting_plat.platform_or_vendor = platform[:64]
         awaiting_plat.confirmation_status = "pending"
         db.commit()
@@ -730,9 +759,9 @@ def _split_prompt(rows: list[tuple[str, float]], user) -> str:
 # --- Flow D: manual earnings -------------------------------------------------
 
 def _platform_picker(lead: str) -> str:
+    options = _PLATFORM_CHOICES + ["Other", "Delete"]
     return (lead + "\n\n"
-            + "\n".join(f"{i}. {p}" for i, p in enumerate(_PLATFORM_CHOICES, 1))
-            + f"\n{len(_PLATFORM_CHOICES) + 1}. Other")
+            + "\n".join(f"{i}. {p}" for i, p in enumerate(options, 1)))
 
 
 def _recent_income_duplicate(db, user_id, platform, amount) -> Record | None:
