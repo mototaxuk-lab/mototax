@@ -282,21 +282,17 @@ def _startup() -> None:
     global _scheduler
     if config.REMINDERS_ENABLED and _scheduler is None:
         _scheduler = BackgroundScheduler(timezone="UTC")
+        # Fire daily; send_reminders() picks the users whose reminder_day is today
+        # and whose reminders are active (Flow H per-user schedule).
         _scheduler.add_job(
             reminders.send_reminders,
-            CronTrigger(
-                day_of_week=config.REMINDER_DAY,
-                hour=config.REMINDER_HOUR_UTC,
-                minute=0,
-                timezone="UTC",
-            ),
-            id="weekly_reminder",
+            CronTrigger(hour=config.REMINDER_HOUR_UTC, minute=0, timezone="UTC"),
+            id="daily_reminder_check",
             misfire_grace_time=3600,
             replace_existing=True,
         )
         _scheduler.start()
-        print(f"[startup] weekly reminder scheduled: {config.REMINDER_DAY} "
-              f"{config.REMINDER_HOUR_UTC:02d}:00 UTC")
+        print(f"[startup] daily reminder check at {config.REMINDER_HOUR_UTC:02d}:00 UTC")
 
 
 @app.get("/", response_class=PlainTextResponse)
