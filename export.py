@@ -116,7 +116,15 @@ def earnings_summary(db: Session, user: User) -> str:
         name = r.platform_or_vendor or "Other"
         by_platform[name] = by_platform.get(name, 0.0) + (r.amount or 0.0)
 
-    lines = ["Earnings added ✅\n", "This week so far:"]
+    # Period line from the most recent income row, if available.
+    period = ""
+    income_rows = [r for r in week_rows
+                   if r.record_type == "income" and r.period_start and r.period_end]
+    if income_rows:
+        r = income_rows[-1]
+        period = f"\nPeriod: {r.period_start} – {r.period_end}"
+
+    lines = [f"Earnings added ✅{period}\n", "This period so far:"]
     for name, amt in sorted(by_platform.items(), key=lambda x: -x[1]):
         lines.append(f"{name}: £{amt:,.2f}")
     total = sum(by_platform.values())

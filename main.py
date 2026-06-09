@@ -538,6 +538,14 @@ def _handle_media(db, user, number, params, num_media) -> None:
             elif not data["platform_or_vendor"]:
                 status = "awaiting_platform"
 
+        # Earnings carry a period (Flow D); default to the user's input frequency.
+        period_kw = {}
+        if data["record_type"] == "income":
+            monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
+            ps, pe = _period_range(monthly)
+            period_kw = dict(period_start=ps.isoformat(), period_end=pe.isoformat(),
+                             entry_frequency="monthly" if monthly else "weekly")
+
         record = Record(
             user_id=user.id,
             record_type=data["record_type"],
@@ -552,7 +560,7 @@ def _handle_media(db, user, number, params, num_media) -> None:
             confidence=data["confidence"],
             # Screenshots and receipts are never retained — keep no media reference.
             original_media_url="" if data["record_type"] in ("income", "expense") else url,
-            notes=data["notes"],
+            notes=data["notes"], **period_kw,
         )
         db.add(record)
         db.commit()
@@ -814,6 +822,17 @@ def _handle_text(db, user, number, body) -> None:
         wa.send_whatsapp(
             number,
             "No problem.\n\nType the expense like this:\n\n\"Delivery bag £45\"")
+        return
+
+    # Flow D §9: asking to SAVE a screenshot as evidence — not in the base product.
+    if "evidence" in low or ("screenshot" in low
+                             and ("save" in low or "saved" in low or "store" in low)):
+        wa.send_whatsapp(
+            number,
+            "Screenshot evidence storage isn't included in the standard version.\n\n"
+            "For now, I save the confirmed earnings record only, not the screenshot "
+            "itself.\n\n"
+            "Evidence storage may be offered later as a paid/pro feature.")
         return
 
     # Flow E2 §9: "is my receipt/image stored?"
@@ -1153,7 +1172,10 @@ def _recent_income_duplicate(db, user_id, platform, amount) -> Record | None:
 
 def _handle_earnings_entry(db, user, number, parsed: dict) -> None:
     """Create pending income record(s) from manual text and prompt to confirm."""
-    period = "this month" if parsed.get("monthly") else "this week"
+    monthly = parsed.get("monthly", False)
+    p_start, p_end = _period_range(monthly)
+    pf = dict(period_start=p_start.isoformat(), period_end=p_end.isoformat(),
+              entry_frequency="monthly" if monthly else "weekly")
     entries = parsed["entries"]
 
     # Platform missing on a single amount → ask which platform first (Flow D §11/14).
@@ -1163,13 +1185,13 @@ def _handle_earnings_entry(db, user, number, parsed: dict) -> None:
             user_id=user.id, record_type="income", record_date=extract._today(),
             category="platform_income", amount=e["amount"], source_type="manual_entry",
             confidence=1.0, confirmation_status="awaiting_platform",
-            notes="Manual earnings entry.",
+            notes="Manual earnings entry.", **pf,
         )
         db.add(rec)
         db.commit()
         wa.send_whatsapp(number, _platform_picker(
-            f"I can log £{e['amount']:.2f} for {period}, but I need the platform.\n\n"
-            "Which platform was this from?"))
+            f"I can log £{e['amount']:.2f} for this period, but I need the platform.\n\n"
+            f"{_period_line(monthly)}\n\nWhich platform was this from?"))
         return
 
     # Multiple platforms in one message (Flow D §10/13).
@@ -1179,16 +1201,15 @@ def _handle_earnings_entry(db, user, number, parsed: dict) -> None:
                 user_id=user.id, record_type="income", record_date=extract._today(),
                 category="platform_income", platform_or_vendor=(e["platform"] or "")[:64],
                 amount=e["amount"], source_type="manual_entry", confidence=1.0,
-                confirmation_status="pending", notes="Manual earnings entry.",
+                confirmation_status="pending", notes="Manual earnings entry.", **pf,
             ))
         db.commit()
-        lines = ["I logged:\n"]
+        lines = ["I logged:\n", _period_line(monthly) + "\n"]
         total = 0.0
         for e in entries:
             total += e["amount"]
             lines.append(f"{e['platform']}: £{e['amount']:.2f}")
         lines.append(f"\nTotal earnings: £{total:.2f}")
-        lines.append(f"Period: {period}")
         lines.append(f"\nConfirm?\n{_OPTIONS_FOOTER}")
         wa.send_whatsapp(number, "\n".join(lines))
         return
@@ -1199,27 +1220,36 @@ def _handle_earnings_entry(db, user, number, parsed: dict) -> None:
         user_id=user.id, record_type="income", record_date=extract._today(),
         category="platform_income", platform_or_vendor=(e["platform"] or "")[:64],
         amount=e["amount"], source_type="manual_entry", confidence=1.0,
-        confirmation_status="pending", notes="Manual earnings entry.",
+        confirmation_status="pending", notes="Manual earnings entry.", **pf,
     )
     db.add(rec)
     db.commit()
 
     dup = _recent_income_duplicate(db, user.id, rec.platform_or_vendor, rec.amount)
-    prompt = _income_prompt(rec, user, period=period)
+    prompt = _income_prompt(rec, user)
     if dup:
-        prompt = ("This looks similar to an earnings record already added for this "
-                  "week.\n\nDo you want to add it again or ignore it?\n\n" + prompt)
+        prompt = ("This looks similar to an earnings record already added.\n\n"
+                  "Do you want to add it again or ignore it?\n\n" + prompt)
     wa.send_whatsapp(number, prompt)
 
 
-def _income_prompt(rec: Record, user, period: str = "this week") -> str:
-    """Confirmation text for a single income record (Flow D §12)."""
+def _income_prompt(rec: Record, user) -> str:
+    """Confirmation text for a single income record (Flow D §14), with period."""
+    monthly = rec.entry_frequency == "monthly"
+    line = _period_line(monthly)
+    if rec.period_start and rec.period_end:
+        try:
+            line = "Period: " + _fmt_period(dt.date.fromisoformat(rec.period_start),
+                                            dt.date.fromisoformat(rec.period_end))
+        except ValueError:
+            pass
     return (
         "I logged:\n\n"
         f"Platform: {rec.platform_or_vendor or '—'}\n"
         f"Earnings: £{rec.amount:.2f}\n"
-        f"Period: {period}\n\n"
-        f"Confirm?\n{_OPTIONS_FOOTER}"
+        f"{line}"
+        + ("\nInput type: monthly" if monthly else "")
+        + f"\n\nConfirm?\n{_OPTIONS_FOOTER}"
     )
 
 
@@ -1405,13 +1435,13 @@ def _confirmation_prompt(data: dict, user) -> str:
     if data["record_type"] == "mileage":
         return _mileage_prompt(data["miles"], user.vehicle_type, user)
 
-    # Earnings screenshot (Flow D §3): confirmed record saved, not the screenshot.
+    # Earnings screenshot (Flow D §4): confirmed record saved, not the screenshot.
     if data["record_type"] == "income":
-        period = data["record_date"] or "this week"
+        monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
         msg = (
             "I detected:\n\n"
             f"Platform: {data['platform_or_vendor'] or '—'}\n"
-            f"Period: {period}\n"
+            f"{_period_line(monthly)}\n"
             f"Earnings: £{data['amount']:.2f}\n\n"
             "I'll save the confirmed earnings record only — the screenshot itself is "
             "never stored.\n\n"
