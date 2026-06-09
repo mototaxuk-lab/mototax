@@ -23,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger
 import config
 import export
 import extract
+import periods
 import reminders
 import settings as vehicle_settings
 import tax
@@ -994,8 +995,11 @@ def _handle_text(db, user, number, body) -> None:
         return
 
     # Flow G: standard export is an Excel record pack; CSV is a paid/pro option.
-    if low in ("export", "report", "excel", "excel pack", "record pack", "pack"):
-        _send_excel_export(db, user, number)
+    # Optional trailing period, e.g. "export last month" / "export 1 jun to 30 jun".
+    if low == "export" or low.startswith(("export ", "report", "excel", "record pack", "pack")):
+        rest = low.split(" ", 1)[1] if " " in low else ""
+        period = periods.resolve(rest) if rest else None
+        _send_excel_export(db, user, number, period)
         return
 
     if low in ("csv", "csv export"):
@@ -1009,8 +1013,10 @@ def _handle_text(db, user, number, body) -> None:
             "summary, ready to share with an accountant.")
         return
 
-    if low in ("summary", "total", "totals"):
-        wa.send_whatsapp(number, export.summary(db, user))
+    if low == "summary" or low.startswith(("summary ", "total", "totals")):
+        rest = low.split(" ", 1)[1] if " " in low else ""
+        period = periods.resolve(rest) if rest else None
+        wa.send_whatsapp(number, export.summary(db, user, period))
         return
 
     if low in ("help", "hi", "hello", "start", "menu"):
@@ -1436,15 +1442,19 @@ def _period_line(monthly: bool) -> str:
     return f"Period: {_fmt_period(start, end)}"
 
 
-def _send_excel_export(db, user, number) -> None:
-    """Flow G: build a standard Excel record-pack link for the current month."""
-    monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
-    # Export packs are period-based; use the current calendar month by default.
-    start, end = _period_range(True)
+def _send_excel_export(db, user, number, period: dict | None = None) -> None:
+    """Flow G: build a standard Excel record-pack link. Defaults to the current
+    month; pass a `period` (from periods.resolve) for last month / tax year / custom."""
+    if period:
+        start, end = period["start"], period["end"]
+        lead = "Your record pack is ready."
+    else:
+        start, end = _period_range(True)  # current calendar month
+        lead = "Your monthly record pack is ready."
     token = make_export_link(db, user.id, fmt="xlsx",
                              period_start=start.isoformat(), period_end=end.isoformat())
     intro = (
-        "Your monthly record pack is ready.\n\n"
+        f"{lead}\n\n"
         f"Period: {_fmt_period(start, end)}\n\n"
         "The standard export is one Excel workbook with separate tabs for "
         "assumptions, income, mileage, non-vehicle expenses, review-only items and "
