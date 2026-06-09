@@ -138,13 +138,19 @@ def _streak(all_dates: list[str], monthly: bool) -> int:
     return count
 
 
-def summary(db: Session, user: User) -> str:
-    """Flow F summary for the user's current period (weekly or monthly)."""
+def summary(db: Session, user: User, period: dict | None = None) -> str:
+    """Flow F summary. Defaults to the user's current period; pass a `period`
+    dict (from periods.resolve) to summarise any past/custom range."""
     monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
-    start, end = _period_range(monthly)
+    if period:
+        start, end = period["start"], period["end"]
+        title = period["title"]
+        monthly = period["frequency"] in ("monthly", "annual")
+    else:
+        start, end = _period_range(monthly)
+        title = "This month's" if monthly else "This week's"
     s_iso, e_iso = start.isoformat(), end.isoformat()
     period_line = f"Period: {_fmt(start)} – {_fmt(end)}"
-    title = "This month's" if monthly else "This week's"
 
     all_rows = _exportable(db, user.id)
     rows = [r for r in all_rows if s_iso <= (r.record_date or "") <= e_iso]
