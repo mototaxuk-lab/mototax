@@ -376,9 +376,20 @@ def _handle_media(db, user, number, params, num_media) -> None:
             wa.send_whatsapp(number, "Sorry, I couldn't read that one. Try a clearer photo?")
             continue
 
-        source = "screenshot" if data["record_type"] == "income" else "receipt_photo"
+        source = "screenshot" if data["record_type"] == "income" else "receipt_ocr"
         if data["record_type"] == "mileage":
             source = "odometer_photo"
+
+        # Flow E2: a receipt we can't read clearly creates no record — the user is
+        # asked to type the expense instead, and the image is never stored.
+        if data["record_type"] == "expense" and data["amount"] is None:
+            wa.send_whatsapp(
+                number,
+                "I couldn't read this receipt clearly.\n\n"
+                "You can type the expense instead, for example:\n\n"
+                "\"Delivery bag £45\"\n\n"
+                "The receipt image will not be stored.")
+            continue
 
         # Flow D: income with an unreadable amount or platform routes to a fix-up
         # step before confirmation, so AI output is never silently saved.
@@ -401,8 +412,8 @@ def _handle_media(db, user, number, params, num_media) -> None:
             source_type=source,
             confirmation_status=status,
             confidence=data["confidence"],
-            # Earnings screenshots are never retained — keep no media reference.
-            original_media_url="" if data["record_type"] == "income" else url,
+            # Screenshots and receipts are never retained — keep no media reference.
+            original_media_url="" if data["record_type"] in ("income", "expense") else url,
             notes=data["notes"],
         )
         db.add(record)
@@ -607,6 +618,29 @@ def _handle_text(db, user, number, body) -> None:
         )
         return
 
+    # Flow E2 §8: abandon any unconfirmed receipt draft and type the expense instead.
+    if low in ("type expense instead", "type instead", "type expense"):
+        for r in _all_pending(db, user.id):
+            if r.record_type == "expense":
+                r.confirmation_status = "rejected"
+        db.commit()
+        wa.send_whatsapp(
+            number,
+            "No problem.\n\nType the expense like this:\n\n\"Delivery bag £45\"")
+        return
+
+    # Flow E2 §9: "is my receipt/image stored?"
+    if ("receipt" in low or "image" in low or "photo" in low or "screenshot" in low) \
+            and ("store" in low or "stored" in low or "save" in low or "saved" in low or "keep" in low):
+        wa.send_whatsapp(
+            number,
+            "No. In the standard flow, I use the receipt only to help extract the "
+            "expense details.\n\n"
+            "After processing, I save only the details you confirm, not the receipt "
+            "image.\n\n"
+            "Please keep the original receipt yourself if you need supporting evidence.")
+        return
+
     if low.startswith("use ") or low.startswith("switch to ") or low.startswith("switch "):
         arg = low.split(" ", 1)[1] if " " in low else ""
         arg = arg.removeprefix("to ").strip()
@@ -636,6 +670,9 @@ def _handle_text(db, user, number, body) -> None:
         has_mileage = any(r.record_type == "mileage" for r in pending)
         has_income = any(r.record_type == "income" for r in pending)
         has_expense = any(r.record_type == "expense" for r in pending)
+        # Receipt-sourced expense → add the Flow E2 "image not stored" reassurance.
+        from_receipt = any(r.record_type == "expense" and r.source_type == "receipt_ocr"
+                           for r in pending)
         for rec in pending:
             rec.confirmation_status = "estimated" if rec.source_type == "user_estimate" else "confirmed"
             rec.confirmed_at = now()
@@ -646,6 +683,12 @@ def _handle_text(db, user, number, body) -> None:
         if has_income:
             wa.send_whatsapp(number, export.earnings_summary(db, user))
         elif has_expense:
+            if from_receipt:
+                wa.send_whatsapp(
+                    number,
+                    "Confirmed ✅\n\nSaved as an expense for accountant review.\n\n"
+                    "The receipt image was not stored. Please keep the original "
+                    "receipt yourself if you need supporting evidence.")
             wa.send_whatsapp(number, export.expense_summary(db, user))
         elif has_mileage:
             # We just asked for earnings, so read the next bare number as earnings.
@@ -695,8 +738,12 @@ def _handle_text(db, user, number, body) -> None:
 
     if low in ("csv", "export", "report"):
         token = make_export_link(db, user.id)
+        note = ("\n\nNote: Receipt and screenshot images are not stored. Expenses "
+                "marked \"receipt OCR\" were read from an uploaded image and confirmed "
+                "by you — keep your original receipts if you need supporting evidence.")
         if config.PUBLIC_BASE_URL:
-            wa.send_whatsapp(number, f"Your CSV (link valid 24h):\n{config.PUBLIC_BASE_URL}/export/{token}")
+            wa.send_whatsapp(number, f"Your CSV (link valid 24h):\n"
+                             f"{config.PUBLIC_BASE_URL}/export/{token}{note}")
         else:
             wa.send_whatsapp(number, "Export link isn't configured yet (set PUBLIC_BASE_URL).")
         return
@@ -1088,16 +1135,17 @@ def _confirmation_prompt(data: dict, user) -> str:
             msg += "\n⚠️ I'm not fully sure on this one — please double-check the figures."
         return msg
 
-    # Expense receipt.
-    amount = f"£{data['amount']:.2f}" if data["amount"] is not None else "£?"
-    vendor = data["platform_or_vendor"] or data["category"]
-    detail = f"{vendor}, {amount}, {data['category']}"
-
-    msg = f"Detected: {detail} (dated {data['record_date']}).\n{_OPTIONS_FOOTER}"
+    # Expense receipt (Flow E2 §3): receipt read, image not stored.
+    description = data["platform_or_vendor"] or data["category"] or "Expense"
+    msg = (
+        "I found:\n\n"
+        f"{description} — £{data['amount']:.2f}\n\n"
+        "Save this as an expense for accountant review?\n\n"
+        "The receipt image will not be stored.\n"
+        f"{_OPTIONS_FOOTER}"
+    )
     if data["confidence"] < config.CONFIDENCE_WARN_THRESHOLD:
         msg += "\n⚠️ I'm not fully sure on this one — please double-check the figures."
-    if data["notes"]:
-        msg += f"\nNote: {data['notes']}"
     return msg
 
 
