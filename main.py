@@ -36,16 +36,19 @@ from models import (
 # The three delivery platforms offered as quick picks when one is unclear.
 _PLATFORM_CHOICES = ["Uber Eats", "Deliveroo", "Just Eat"]
 
-# Shown when someone tries to log a vehicle running cost as an expense.
-_VEHICLE_COST_MESSAGE = (
-    "That looks like a vehicle running cost (e.g. fuel, insurance, repairs, "
-    "servicing or tyres).\n\n"
-    "You're on the simplified-mileage method, so these are already covered by your "
-    "per-mile rate — they can't be claimed separately. I won't log it as an "
-    "expense.\n\n"
-    "Just keep sending your delivery miles and that's taken care of. "
-    "(Parking and tolls are fine to log separately.)"
-)
+def _vehicle_cost_warning(item: str = "") -> str:
+    """Heads-up shown when an expense looks like a vehicle running cost. We don't
+    block it — the user can confirm to log it anyway."""
+    what = item.strip() or "this"
+    return (
+        f"⚠️ Heads up: {what} looks like a vehicle running cost (fuel, insurance, "
+        "repairs, servicing, tyres, etc.).\n\n"
+        "On the simplified-mileage method these are already covered by your per-mile "
+        "rate, so they're normally not logged separately. (Parking and tolls are "
+        "fine to log separately.)\n\n"
+        "If it's a genuinely separate cost you still want recorded, confirm below — "
+        "otherwise delete it."
+    )
 
 app = FastAPI(title="Courier Tax & Records Assistant")
 
@@ -408,14 +411,6 @@ def _handle_media(db, user, number, params, num_media) -> None:
             wa.send_whatsapp(number, _mileage_prompt(miles, vt, user))
             continue
 
-        # Receipt for a vehicle running cost (fuel/insurance/repairs/etc.): under
-        # simplified mileage these are covered by the per-mile rate, so we don't
-        # log them as separate expenses.
-        if data["record_type"] == "expense" and \
-                extract.is_vehicle_running_cost(data["platform_or_vendor"], data["category"]):
-            wa.send_whatsapp(number, _VEHICLE_COST_MESSAGE)
-            continue
-
         source = "screenshot" if data["record_type"] == "income" else "receipt_ocr"
 
         # Flow E2: a receipt we can't read clearly creates no record — the user is
@@ -465,7 +460,11 @@ def _handle_media(db, user, number, params, num_media) -> None:
                 "I can read the earnings amount, but I'm not sure which platform this "
                 "is from.\n\nWhich platform is this?"))
         else:
-            wa.send_whatsapp(number, _confirmation_prompt(data, user))
+            prompt = _confirmation_prompt(data, user)
+            if data["record_type"] == "expense" and \
+                    extract.is_vehicle_running_cost(data["platform_or_vendor"], data["category"]):
+                prompt = _vehicle_cost_warning(data["platform_or_vendor"]) + "\n\n" + prompt
+            wa.send_whatsapp(number, prompt)
 
 
 def _is_new_loggable(body: str) -> str | None:
@@ -1031,13 +1030,10 @@ def _handle_expense_entry(db, user, number, parsed: dict) -> None:
     is always no, so original_media_url stays empty)."""
     entries = parsed["entries"]
 
-    # Drop vehicle running costs — covered by simplified mileage, not separately
-    # claimable. If everything was a vehicle cost, just explain and stop.
-    rejected = [e for e in entries if extract.is_vehicle_running_cost(e["description"], e["category"])]
-    entries = [e for e in entries if e not in rejected]
-    if not entries:
-        wa.send_whatsapp(number, _VEHICLE_COST_MESSAGE)
-        return
+    # Vehicle running costs aren't blocked — but we warn the user that simplified
+    # mileage already covers them, so they can decide whether to log anyway.
+    vehicle_costs = [e for e in entries
+                     if extract.is_vehicle_running_cost(e["description"], e["category"])]
 
     # Description given but no amount yet (Flow E1 §6) — ask for the amount.
     if parsed["amount_missing"]:
@@ -1049,15 +1045,14 @@ def _handle_expense_entry(db, user, number, parsed: dict) -> None:
             confirmation_status="awaiting_expense_amount", notes="Typed expense.",
         ))
         db.commit()
+        if vehicle_costs:
+            wa.send_whatsapp(number, _vehicle_cost_warning(e["description"]))
         wa.send_whatsapp(number, f"How much was the {e['description'].lower()}?")
         return
 
-    if rejected:  # some items were vehicle costs we skipped
-        names = ", ".join(e["description"] for e in rejected)
-        wa.send_whatsapp(
-            number,
-            f"Note: I didn't log {names} — vehicle running costs are covered by your "
-            "simplified-mileage rate, so they can't be claimed separately.")
+    if vehicle_costs:
+        names = ", ".join(e["description"] for e in vehicle_costs)
+        wa.send_whatsapp(number, _vehicle_cost_warning(names))
 
     for e in entries:
         db.add(Record(
