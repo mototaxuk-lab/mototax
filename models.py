@@ -52,6 +52,23 @@ class User(Base):
     # onboarding_step: ask_vehicle | ask_tax | done
     onboarding_step: Mapped[str] = mapped_column(String(16), default="ask_vehicle")
 
+    # Flow C (vehicle settings). vehicle_type above is the *main* vehicle.
+    # default_vehicle: assumed when mileage is sent without a vehicle (falls back to main)
+    default_vehicle: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # extra_vehicles: comma-separated canonical keys the user also has (excludes main)
+    extra_vehicles: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # settings_state: where the user is in the settings menu (carries payload after ':')
+    settings_state: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # expecting: one-shot hint for the next message ("earnings"), so a bare number
+    # is read as earnings when we just asked for them instead of as mileage.
+    expecting: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # log_frequency: default period when a message doesn't say week/month.
+    # "weekly" | "monthly". A per-message "this month"/"this week" still overrides.
+    log_frequency: Mapped[str] = mapped_column(String(8), default="weekly")
+    # Terms & Privacy acceptance recorded during onboarding (Flow A).
+    terms_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    terms_accepted_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
     records: Mapped[list["Record"]] = relationship(back_populates="user")
 
 
@@ -64,6 +81,10 @@ class Record(Base):
     # record_type: income | expense | mileage
     record_type: Mapped[str] = mapped_column(String(16))
     record_date: Mapped[str] = mapped_column(String(10))  # ISO yyyy-mm-dd
+    # Period the entry covers (Flow B). ISO yyyy-mm-dd; entry_frequency weekly|monthly.
+    period_start: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    period_end: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    entry_frequency: Mapped[str | None] = mapped_column(String(8), nullable=True)
     platform_or_vendor: Mapped[str] = mapped_column(String(64), default="")
     category: Mapped[str] = mapped_column(String(32), default="")
 
@@ -114,9 +135,19 @@ _USER_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",
     "tax_rate": _FLOAT_SQL,
     "onboarding_step": "VARCHAR(16) DEFAULT 'ask_vehicle'",
+    "default_vehicle": "VARCHAR(16)",
+    "extra_vehicles": "VARCHAR(64)",
+    "settings_state": "VARCHAR(48)",
+    "expecting": "VARCHAR(16)",
+    "log_frequency": "VARCHAR(8) DEFAULT 'weekly'",
+    "terms_version": "VARCHAR(16)",
+    "terms_accepted_at": "TIMESTAMP",
 }
 _RECORD_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",
+    "period_start": "VARCHAR(10)",
+    "period_end": "VARCHAR(10)",
+    "entry_frequency": "VARCHAR(8)",
 }
 
 
@@ -166,6 +197,16 @@ def latest_awaiting_vehicle(db: Session, user_id: int) -> Record | None:
     return (
         db.query(Record)
         .filter_by(user_id=user_id, confirmation_status="awaiting_vehicle")
+        .order_by(Record.created_at.desc())
+        .first()
+    )
+
+
+def latest_awaiting_platform(db: Session, user_id: int) -> Record | None:
+    """An income record waiting for the user to say which platform it was from."""
+    return (
+        db.query(Record)
+        .filter_by(user_id=user_id, confirmation_status="awaiting_platform")
         .order_by(Record.created_at.desc())
         .first()
     )

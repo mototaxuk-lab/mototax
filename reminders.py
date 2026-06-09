@@ -20,18 +20,38 @@ import twilio_client as wa
 from models import Record, SessionLocal, User, now
 
 
+def _period_line(monthly: bool) -> str:
+    d = dt.date.today()
+    if monthly:
+        start = d.replace(day=1)
+        nxt = (start.replace(year=start.year + 1, month=1) if start.month == 12
+               else start.replace(month=start.month + 1))
+        end = nxt - dt.timedelta(days=1)
+    else:
+        start = d - dt.timedelta(days=d.weekday())
+        end = start + dt.timedelta(days=6)
+    return f"Period: {start.day} {start:%b} – {end.day} {end:%b %Y}"
+
+
 def reminder_body(user: User) -> str:
-    """Per-user reminder text, naming the currently-active vehicle as a nudge to
-    switch before logging if they changed vehicle."""
-    vehicle = ""
-    if user.vehicle_type:
-        vehicle = f" — currently logging to {tax.emoji(user.vehicle_type)} {tax.label(user.vehicle_type)}"
+    """Mileage check-in reminder (Flow B §1/§2), weekly or monthly per the user."""
+    monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
+    if monthly:
+        return (
+            "Monthly mileage check-in 🔥\n\n"
+            "Send your delivery miles for this month.\n\n"
+            f"{_period_line(True)}\n\n"
+            "Example:\n\"520 miles\"\n\n"
+            "Weekly logging is usually fresher, but monthly is fine if that works "
+            "better for you."
+        )
     return (
-        "Quick weekly check-in 🔥\n"
-        f"Send your delivery miles for this week{vehicle}.\n"
-        "(Type \"use bike\" first if you switched vehicle.)\n"
-        "Example: \"120 miles\"\n"
-        "Add earnings screenshots if you want your real take-home estimate."
+        "Quick weekly check-in 🔥\n\n"
+        "Send your delivery miles for this week.\n\n"
+        f"{_period_line(False)}\n\n"
+        "Example:\n\"120 miles\"\n\n"
+        "Add earnings screenshots or typed earnings if you want your real "
+        "take-home estimate."
     )
 
 

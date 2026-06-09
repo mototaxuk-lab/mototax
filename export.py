@@ -13,17 +13,23 @@ import tax
 from models import Record, User
 
 CSV_COLUMNS = [
-    "date", "record_type", "vehicle_type", "platform_or_vendor", "amount_gbp", "miles",
-    "category", "source_type", "confirmation_status", "confidence",
+    "date", "period_start", "period_end", "entry_frequency", "record_type",
+    "vehicle_type", "platform_or_vendor", "amount_gbp", "miles", "category",
+    "source_type", "confirmation_status", "included_in_total", "confidence",
     "original_file_reference", "notes",
 ]
 
 
-def _exportable(db: Session, user_id: int) -> list[Record]:
+def _exportable(db: Session, user_id: int, include_review: bool = False) -> list[Record]:
+    """Records that count toward totals (confirmed/estimated). Pass include_review
+    to also return review-only items — they belong in the export but NOT in totals."""
+    statuses = ["confirmed", "estimated"]
+    if include_review:
+        statuses.append("review_required")
     return (
         db.query(Record)
         .filter(Record.user_id == user_id,
-                Record.confirmation_status.in_(["confirmed", "estimated"]))
+                Record.confirmation_status.in_(statuses))
         .order_by(Record.record_date.asc(), Record.id.asc())
         .all()
     )
@@ -41,16 +47,19 @@ def _miles_by_vehicle(rows: list[Record], default_type: str | None) -> dict[str,
 
 
 def build_csv(db: Session, user_id: int) -> str:
-    rows = _exportable(db, user_id)
+    rows = _exportable(db, user_id, include_review=True)
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(CSV_COLUMNS)
     for r in rows:
+        in_total = "no" if r.confirmation_status == "review_required" else "yes"
         writer.writerow([
-            r.record_date, r.record_type, r.vehicle_type or "", r.platform_or_vendor,
+            r.record_date, r.period_start or "", r.period_end or "",
+            r.entry_frequency or "", r.record_type, r.vehicle_type or "",
+            r.platform_or_vendor,
             f"{r.amount:.2f}" if r.amount is not None else "",
             f"{r.miles:.1f}" if r.miles is not None else "",
-            r.category, r.source_type, r.confirmation_status,
+            r.category, r.source_type, r.confirmation_status, in_total,
             f"{r.confidence:.2f}", r.original_media_url, r.notes,
         ])
     return buf.getvalue()
@@ -91,6 +100,61 @@ def weekly_summary(db: Session, user: User) -> str:
             f"(at {user.tax_rate * 100:.0f}% tax rate)"
         )
     lines.append("\nIndicative only, based on what you've confirmed — not tax advice.")
+    return "\n".join(lines)
+
+
+def earnings_summary(db: Session, user: User) -> str:
+    """Flow D summary after confirming earnings: this-week totals per platform."""
+    import datetime as dt
+    week_ago = (dt.date.today() - dt.timedelta(days=7)).isoformat()
+    week_rows = [r for r in _exportable(db, user.id) if (r.record_date or "") >= week_ago]
+
+    by_platform: dict[str, float] = {}
+    for r in week_rows:
+        if r.record_type != "income":
+            continue
+        name = r.platform_or_vendor or "Other"
+        by_platform[name] = by_platform.get(name, 0.0) + (r.amount or 0.0)
+
+    # Period line from the most recent income row, if available.
+    period = ""
+    income_rows = [r for r in week_rows
+                   if r.record_type == "income" and r.period_start and r.period_end]
+    if income_rows:
+        r = income_rows[-1]
+        period = f"\nPeriod: {r.period_start} – {r.period_end}"
+
+    lines = [f"Earnings added ✅{period}\n", "This period so far:"]
+    for name, amt in sorted(by_platform.items(), key=lambda x: -x[1]):
+        lines.append(f"{name}: £{amt:,.2f}")
+    total = sum(by_platform.values())
+    lines.append(f"\nTotal earnings logged: £{total:,.2f}")
+
+    # Only nudge for mileage if none has been logged this week — otherwise the
+    # user just confirmed it and being asked again is confusing.
+    has_mileage = any(r.record_type == "mileage" for r in week_rows)
+    if not has_mileage:
+        lines.append("\nAdd mileage if you want your mileage deduction and estimated "
+                     "real take-home.")
+    return "\n".join(lines)
+
+
+def expense_summary(db: Session, user: User) -> str:
+    """Flow E1 summary after confirming expenses: this-week expenses listed."""
+    import datetime as dt
+    week_ago = (dt.date.today() - dt.timedelta(days=7)).isoformat()
+    rows = [
+        r for r in _exportable(db, user.id)
+        if r.record_type == "expense" and (r.record_date or "") >= week_ago
+    ]
+    lines = ["Expense added ✅\n", "This week's expenses for accountant review:"]
+    total = 0.0
+    for r in sorted(rows, key=lambda x: x.id):
+        label = r.platform_or_vendor or r.category or "Expense"
+        total += r.amount or 0.0
+        lines.append(f"{label}: £{(r.amount or 0):,.2f}")
+    if len(rows) > 1:
+        lines.append(f"\nTotal expenses logged: £{total:,.2f}")
     return "\n".join(lines)
 
 
