@@ -401,7 +401,8 @@ def _handle_media(db, user, number, params, num_media) -> None:
             source_type=source,
             confirmation_status=status,
             confidence=data["confidence"],
-            original_media_url=url,
+            # Earnings screenshots are never retained — keep no media reference.
+            original_media_url="" if data["record_type"] == "income" else url,
             notes=data["notes"],
         )
         db.add(record)
@@ -524,10 +525,7 @@ def _handle_text(db, user, number, body) -> None:
         )
         return
 
-    # "4" / "evidence" — confirm a screenshot earnings record AND keep the image.
-    keep_evidence = low in ("4", "evidence", "save screenshot as evidence", "save evidence")
-
-    if low in ("1", "confirm", "yes", "y", "confirm all") or keep_evidence:
+    if low in ("1", "confirm", "yes", "y", "confirm all"):
         pending = _all_pending(db, user.id)
         if not pending:
             wa.send_whatsapp(number, "Nothing waiting to confirm. Send a photo or your mileage.")
@@ -537,15 +535,11 @@ def _handle_text(db, user, number, body) -> None:
         for rec in pending:
             rec.confirmation_status = "estimated" if rec.source_type == "user_estimate" else "confirmed"
             rec.confirmed_at = now()
-            # Privacy default (Flow D §16): don't retain the raw screenshot unless
-            # the user explicitly chose to save it as evidence.
-            if rec.record_type == "income" and not keep_evidence:
+            # We never retain raw earnings screenshots — only the confirmed figures.
+            if rec.record_type == "income":
                 rec.original_media_url = ""
         db.commit()
         if has_income:
-            if keep_evidence:
-                wa.send_whatsapp(number, "Screenshot saved as evidence ✅\n\n"
-                                 "You can delete saved evidence later from your records.")
             wa.send_whatsapp(number, export.earnings_summary(db, user))
         elif has_mileage:
             wa.send_whatsapp(
@@ -904,11 +898,10 @@ def _confirmation_prompt(data: dict, user) -> str:
             f"Platform: {data['platform_or_vendor'] or '—'}\n"
             f"Period: {period}\n"
             f"Earnings: £{data['amount']:.2f}\n\n"
-            "By default, I'll save the confirmed earnings record, not the screenshot "
-            "itself.\n\n"
+            "I'll save the confirmed earnings record only — the screenshot itself is "
+            "never stored.\n\n"
             "Do you want to confirm this?\n"
-            f"{_OPTIONS_FOOTER}\n"
-            "Reply 4 to also save the screenshot as evidence."
+            f"{_OPTIONS_FOOTER}"
         )
         if data["confidence"] < config.CONFIDENCE_WARN_THRESHOLD:
             msg += "\n⚠️ I'm not fully sure on this one — please double-check the figures."
