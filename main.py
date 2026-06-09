@@ -245,7 +245,7 @@ HELP = (
     "After I read something, reply 1 to confirm, 2 to edit, or 3 to delete.\n"
     "Got more than one vehicle? Type \"use car\", \"use motorbike\" or \"use bike\" to switch, "
     "or VEHICLES to see them.\n"
-    "Type CSV for your export, SUMMARY for your totals, or SETTINGS to update your profile."
+    "Type EXPORT for your Excel record pack, SUMMARY for your totals, or SETTINGS to update your profile."
 )
 
 # --- Onboarding answer parsing -------------------------------------------------
@@ -342,12 +342,21 @@ def export_csv(token: str):
         age = now() - link.created_at.replace(tzinfo=dt.timezone.utc)
         if age > dt.timedelta(hours=24):
             return PlainTextResponse("Link expired.", status_code=410)
-        csv_text = export.build_csv(db, link.user_id)
-        filename = f"courier-records-{dt.date.today().isoformat()}.csv"
+        today = dt.date.today().isoformat()
+        ps, pe = getattr(link, "period_start", None), getattr(link, "period_end", None)
+        if getattr(link, "fmt", "xlsx") == "csv":
+            content = export.build_csv(db, link.user_id)
+            return Response(
+                content=content, media_type="text/csv",
+                headers={"Content-Disposition":
+                         f'attachment; filename="courier-records-{today}.csv"'},
+            )
+        data = export.build_xlsx(db, link.user_id, db.get(User, link.user_id), ps, pe)
         return Response(
-            content=csv_text,
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            content=data,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition":
+                     f'attachment; filename="courier-record-pack-{today}.xlsx"'},
         )
     finally:
         db.close()
@@ -953,16 +962,20 @@ def _handle_text(db, user, number, body) -> None:
             wa.send_whatsapp(number, "Deleted. Send it again or type the correct value.")
         return
 
-    if low in ("csv", "export", "report"):
-        token = make_export_link(db, user.id)
-        note = ("\n\nNote: Receipt and screenshot images are not stored. Expenses "
-                "marked \"receipt OCR\" were read from an uploaded image and confirmed "
-                "by you — keep your original receipts if you need supporting evidence.")
-        if config.PUBLIC_BASE_URL:
-            wa.send_whatsapp(number, f"Your CSV (link valid 24h):\n"
-                             f"{config.PUBLIC_BASE_URL}/export/{token}{note}")
-        else:
-            wa.send_whatsapp(number, "Export link isn't configured yet (set PUBLIC_BASE_URL).")
+    # Flow G: standard export is an Excel record pack; CSV is a paid/pro option.
+    if low in ("export", "report", "excel", "excel pack", "record pack", "pack"):
+        _send_excel_export(db, user, number)
+        return
+
+    if low in ("csv", "csv export"):
+        wa.send_whatsapp(
+            number,
+            "CSV export is a paid/pro option.\n\n"
+            "CSV files are mainly for importing into accounting software, and "
+            "different platforms may need different formats.\n\n"
+            "The standard export is an Excel record pack (type EXPORT) — it has "
+            "separate tabs for income, mileage, expenses, review-only items and a "
+            "summary, ready to share with an accountant.")
         return
 
     if low in ("summary", "total", "totals"):
@@ -1390,6 +1403,31 @@ def _fmt_period(start: dt.date, end: dt.date) -> str:
 def _period_line(monthly: bool) -> str:
     start, end = _period_range(monthly)
     return f"Period: {_fmt_period(start, end)}"
+
+
+def _send_excel_export(db, user, number) -> None:
+    """Flow G: build a standard Excel record-pack link for the current month."""
+    monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
+    # Export packs are period-based; use the current calendar month by default.
+    start, end = _period_range(True)
+    token = make_export_link(db, user.id, fmt="xlsx",
+                             period_start=start.isoformat(), period_end=end.isoformat())
+    intro = (
+        "Your monthly record pack is ready.\n\n"
+        f"Period: {_fmt_period(start, end)}\n\n"
+        "The standard export is one Excel workbook with separate tabs for "
+        "assumptions, income, mileage, non-vehicle expenses, review-only items and "
+        "a summary.\n\n"
+        "It's a record pack for review by you or your accountant — not a completed "
+        "tax return.\n\n"
+        "CSV export is also available as a paid/pro option (type CSV)."
+    )
+    if config.PUBLIC_BASE_URL:
+        wa.send_whatsapp(number, f"{intro}\n\nDownload (link valid 24h):\n"
+                         f"{config.PUBLIC_BASE_URL}/export/{token}")
+    else:
+        wa.send_whatsapp(number, intro + "\n\n(Export link isn't configured yet — "
+                         "set PUBLIC_BASE_URL.)")
 
 
 def _mileage_prompt(miles: float, vehicle_type, user, updated: bool = False,
