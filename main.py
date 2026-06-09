@@ -211,9 +211,9 @@ HOW_IT_WORKS = (
 )
 
 FREE_TRIAL = (
-    "Your first month is free.\n\n"
-    "After that, it's £5/month to keep weekly tracking, monthly exports and annual "
-    "records."
+    "You're in the free beta ✅\n\n"
+    "You can use weekly tracking and record exports while we test the service.\n\n"
+    "We'll let you know before any paid access is introduced."
 )
 
 FIRST_ACTION = (

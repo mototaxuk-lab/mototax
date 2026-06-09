@@ -72,6 +72,8 @@ class User(Base):
     reminder_day: Mapped[str] = mapped_column(String(3), default="sun")
     reminder_time_label: Mapped[str] = mapped_column(String(8), default="evening")
     reminder_status: Mapped[str] = mapped_column(String(8), default="active")
+    # Access model (Flow I): beta | trial | active | paused | cancelled | partner.
+    plan_status: Mapped[str] = mapped_column(String(12), default="beta")
 
     records: Mapped[list["Record"]] = relationship(back_populates="user")
 
@@ -154,6 +156,7 @@ _USER_ADDED_COLUMNS = {
     "reminder_day": "VARCHAR(3) DEFAULT 'sun'",
     "reminder_time_label": "VARCHAR(8) DEFAULT 'evening'",
     "reminder_status": "VARCHAR(8) DEFAULT 'active'",
+    "plan_status": "VARCHAR(12) DEFAULT 'beta'",
 }
 _RECORD_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",
