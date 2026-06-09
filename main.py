@@ -470,14 +470,25 @@ def _handle_text(db, user, number, body) -> None:
         return
 
     if low in ("1", "confirm", "yes", "y"):
-        rec = latest_pending(db, user.id)
-        if not rec:
+        pending = _all_pending(db, user.id)
+        if not pending:
             wa.send_whatsapp(number, "Nothing waiting to confirm. Send a photo or your mileage.")
             return
-        rec.confirmation_status = "estimated" if rec.source_type == "user_estimate" else "confirmed"
-        rec.confirmed_at = now()
+        has_mileage = any(r.record_type == "mileage" for r in pending)
+        for rec in pending:
+            rec.confirmation_status = "estimated" if rec.source_type == "user_estimate" else "confirmed"
+            rec.confirmed_at = now()
         db.commit()
-        wa.send_whatsapp(number, "✅ Saved.")
+        if has_mileage:
+            wa.send_whatsapp(
+                number,
+                "Confirmed ✅\n\n"
+                "Your mileage record has been added for this week.\n\n"
+                "Add earnings screenshots or type your earnings if you want your real "
+                "take-home estimate.",
+            )
+        else:
+            wa.send_whatsapp(number, "Confirmed ✅ Saved.")
         return
 
     if low in ("2", "edit", "change"):
@@ -494,11 +505,15 @@ def _handle_text(db, user, number, body) -> None:
         return
 
     if low in ("3", "delete", "discard", "no", "n"):
-        rec = latest_pending(db, user.id)
-        if rec:
+        pending = _all_pending(db, user.id)
+        had_mileage = any(r.record_type == "mileage" for r in pending)
+        for rec in pending:
             rec.confirmation_status = "rejected"
-            db.commit()
-        wa.send_whatsapp(number, "Deleted. Send it again or type the correct value.")
+        db.commit()
+        if had_mileage:
+            wa.send_whatsapp(number, "Deleted. No mileage record was saved for this week.")
+        else:
+            wa.send_whatsapp(number, "Deleted. Send it again or type the correct value.")
         return
 
     if low in ("csv", "export", "report"):
@@ -517,36 +532,113 @@ def _handle_text(db, user, number, body) -> None:
         wa.send_whatsapp(number, HELP)
         return
 
-    # Try to read it as a mileage entry ("145 miles", or just "145").
+    # "What miles should I include?" — guidance (Flow B section 15).
+    if "what miles" in low or ("which miles" in low and "include" in low):
+        wa.send_whatsapp(
+            number,
+            "Include miles you used for delivery work.\n\n"
+            "Do not include personal trips.\n\n"
+            "If you are unsure, log the miles you believe were for delivery work and "
+            "your accountant can review your records later.",
+        )
+        return
+
+    # Try to read it as a mileage entry. Handles single / split / monthly /
+    # personal+delivery / vehicle-tagged inputs (see extract.parse_mileage_text).
     mileage = extract.parse_mileage_text(body)
     if mileage:
-        record = Record(
-            user_id=user.id,
-            record_type="mileage",
-            record_date=mileage["record_date"],
-            category="mileage",
-            miles=mileage["miles"],
-            vehicle_type=user.vehicle_type,
-            source_type=mileage["source_hint"],
-            confidence=mileage["confidence"],
-            notes=mileage["notes"],
+        _handle_mileage_entry(db, user, number, mileage)
+        return
+
+    # Sounds like mileage but no number we could read (Flow B section 11).
+    if any(w in low for w in ("mile", "drove", "drive", "driving", "rode", "cycled")):
+        wa.send_whatsapp(
+            number,
+            "I need the number of delivery miles to log this.\n\n"
+            "Please send it like this:\n\n"
+            "\"120 miles\"",
         )
-        # If the courier uses more than one vehicle, confirm which one before logging
-        # (defends against forgetting to switch). Single-vehicle users are unaffected.
-        if len(_logged_vehicle_types(db, user.id)) >= 2:
-            record.confirmation_status = "awaiting_vehicle"
-            db.add(record)
-            db.commit()
-            options = _vehicle_options(db, user)
-            wa.send_whatsapp(number, _which_vehicle_prompt(options, tax.normalise_vehicle(user.vehicle_type)))
-        else:
-            record.confirmation_status = "pending"
-            db.add(record)
-            db.commit()
-            wa.send_whatsapp(number, _mileage_prompt(mileage["miles"], user.vehicle_type, user))
         return
 
     wa.send_whatsapp(number, HELP)
+
+
+def _handle_mileage_entry(db, user, number, parsed: dict) -> None:
+    """Create pending mileage record(s) from a parsed input and prompt to confirm."""
+    note_suffix = ""
+    if parsed.get("monthly"):
+        note_suffix = " (logged as monthly user-entered mileage)"
+
+    # Split mileage: one pending record per vehicle, confirmed/deleted together.
+    if parsed["kind"] == "split":
+        rows = []
+        for seg in parsed["segments"]:
+            vt = seg["vehicle_hint"] or tax.normalise_vehicle(user.vehicle_type)
+            rec = Record(
+                user_id=user.id, record_type="mileage", record_date=parsed["record_date"],
+                category="mileage", miles=seg["miles"], vehicle_type=vt,
+                source_type=parsed["source_hint"], confidence=parsed["confidence"],
+                confirmation_status="pending",
+                notes="User-entered split mileage." + note_suffix,
+            )
+            db.add(rec)
+            rows.append((vt, seg["miles"]))
+        db.commit()
+        wa.send_whatsapp(number, _split_prompt(rows, user))
+        return
+
+    # Single entry. Vehicle priority: explicit tag > prompt (multi-vehicle) > default.
+    vehicle_hint = parsed.get("vehicle_hint")
+    high_warning = parsed.get("too_high")
+
+    record = Record(
+        user_id=user.id, record_type="mileage", record_date=parsed["record_date"],
+        category="mileage", miles=parsed["miles"],
+        vehicle_type=vehicle_hint or user.vehicle_type,
+        source_type=parsed["source_hint"], confidence=parsed["confidence"],
+        notes=parsed["notes"] + note_suffix,
+    )
+
+    # Multi-vehicle user with no explicit vehicle tag: ask which vehicle first.
+    if not vehicle_hint and len(_logged_vehicle_types(db, user.id)) >= 2:
+        record.confirmation_status = "awaiting_vehicle"
+        db.add(record)
+        db.commit()
+        options = _vehicle_options(db, user)
+        wa.send_whatsapp(number, _which_vehicle_prompt(options, tax.normalise_vehicle(user.vehicle_type)))
+        return
+
+    record.confirmation_status = "pending"
+    db.add(record)
+    db.commit()
+
+    prompt = _mileage_prompt(parsed["miles"], record.vehicle_type, user,
+                             monthly=parsed.get("monthly", False),
+                             personal_excluded=parsed.get("personal_excluded"))
+    if high_warning:
+        prompt = (f"That looks unusually high for one week.\n"
+                  f"Did you mean {parsed['miles']:,.0f} delivery miles for this week?\n\n" + prompt)
+    wa.send_whatsapp(number, prompt)
+
+
+def _split_prompt(rows: list[tuple[str, float]], user) -> str:
+    """Confirmation text for a split-mileage entry (one line per vehicle)."""
+    lines = ["I logged split mileage for this week:\n"]
+    total_miles = 0.0
+    total_deduction = 0.0
+    for vt, miles in rows:
+        ded = tax.mileage_deduction(miles, vt)
+        total_miles += miles
+        total_deduction += ded
+        lines.append(f"{tax.label(vt)}: {miles:.0f} miles — £{ded:.0f} deduction")
+    lines.append(f"\nTotal miles: {total_miles:.0f}")
+    lines.append(f"Total mileage deduction: £{_money(total_deduction)}")
+    if user.tax_rate:
+        benefit = tax.tax_benefit(total_deduction, user.tax_rate)
+        lines.append(f"Estimated tax benefit: up to ~£{_money(benefit)}, "
+                     f"assuming {user.tax_rate * 100:.0f}% tax rate.")
+    lines.append(f"\n{_OPTIONS_FOOTER}")
+    return "\n".join(lines)
 
 
 _VEHICLE_ORDER = ("car_van", "motorbike", "bicycle")
@@ -587,20 +679,44 @@ def _which_vehicle_prompt(options: list[str], active: str) -> str:
 _OPTIONS_FOOTER = "Reply 1 to confirm, 2 to edit, or 3 to delete."
 
 
-def _mileage_prompt(miles: float, vehicle_type, user, updated: bool = False) -> str:
+def _money(value: float) -> str:
+    """Format GBP: drop the decimals when whole, otherwise show 2 dp."""
+    return f"{value:.0f}" if abs(value - round(value)) < 0.005 else f"{value:.2f}"
+
+
+def _mileage_prompt(miles: float, vehicle_type, user, updated: bool = False,
+                    monthly: bool = False, personal_excluded: float | None = None) -> str:
     """Confirmation text for a mileage entry, with deduction + tax-benefit estimate."""
     deduction = tax.mileage_deduction(miles, vehicle_type)
+    period = "this month" if monthly else "this week"
     lead = "Updated to" if updated else "I logged"
     msg = (
-        f"{lead} {miles:.0f} delivery miles ({tax.label(vehicle_type)} {tax.emoji(vehicle_type)}) "
-        f"for this week.\n"
-        f"Estimated mileage deduction: £{deduction:.0f}"
+        f"{lead} {miles:.0f} delivery miles for {period} using your main vehicle: "
+        f"{tax.label(vehicle_type)}.\n\n"
+        f"Estimated mileage deduction: £{_money(deduction)}"
     )
+    if personal_excluded:
+        msg = (f"I'll log only the delivery-business miles.\n\n"
+               f"Delivery miles: {miles:.0f}\n\n") + msg
     if user.tax_rate:
         benefit = tax.tax_benefit(deduction, user.tax_rate)
-        msg += f"\nEstimated tax benefit: up to ~£{benefit:.0f} (at {user.tax_rate * 100:.0f}% tax rate)"
-    msg += f"\n\n{_OPTIONS_FOOTER}"
+        msg += (f"\nEstimated tax benefit: up to ~£{_money(benefit)}, "
+                f"assuming {user.tax_rate * 100:.0f}% tax rate.")
+    if monthly:
+        msg += ("\n\nFor better accuracy, weekly mileage is recommended because it is "
+                "fresher.")
+    msg += f"\n\nConfirm?\n{_OPTIONS_FOOTER}"
     return msg
+
+
+def _all_pending(db, user_id: int) -> list[Record]:
+    """All records currently awaiting confirmation (a split creates several)."""
+    return (
+        db.query(Record)
+        .filter_by(user_id=user_id, confirmation_status="pending")
+        .order_by(Record.created_at.asc())
+        .all()
+    )
 
 
 def _confirmation_prompt(data: dict, user) -> str:

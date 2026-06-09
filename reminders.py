@@ -21,17 +21,14 @@ from models import Record, SessionLocal, User, now
 
 
 def reminder_body(user: User) -> str:
-    """Per-user reminder text, naming the currently-active vehicle as a nudge to
-    switch before logging if they changed vehicle."""
-    vehicle = ""
-    if user.vehicle_type:
-        vehicle = f" — currently logging to {tax.emoji(user.vehicle_type)} {tax.label(user.vehicle_type)}"
+    """Weekly check-in reminder (Flow B section 1). The minimum action is just miles."""
     return (
-        "Quick weekly check-in 🔥\n"
-        f"Send your delivery miles for this week{vehicle}.\n"
-        "(Type \"use bike\" first if you switched vehicle.)\n"
-        "Example: \"120 miles\"\n"
-        "Add earnings screenshots if you want your real take-home estimate."
+        "Quick weekly check-in 🔥\n\n"
+        "Send your delivery miles for this week.\n\n"
+        "Example:\n"
+        "\"120 miles\"\n\n"
+        "Add earnings screenshots or type your earnings if you want your real "
+        "take-home estimate."
     )
 
 

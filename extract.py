@@ -115,26 +115,117 @@ def _normalise(raw: str) -> dict:
 _MILES_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:mi|mile|miles|m)\b", re.IGNORECASE)
 _BARE_NUMBER_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*$")
 
+# A single mileage segment, optionally tagged with a vehicle word ("80 miles car").
+# Longer unit/vehicle spellings come first so "miles" isn't half-matched as "mi".
+_SEGMENT_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(?:miles|mile|mi|m)?\.?\s*"
+    r"(motorbike|motorcycle|moped|bicycle|e-?bike|bike|cycle|car|van)?\b",
+    re.IGNORECASE,
+)
 
-def parse_mileage_text(body: str) -> dict | None:
-    """Cheap, no-API mileage parse for messages like '145 miles' or just '145'.
+# Map free-text vehicle words to canonical vehicle_type keys.
+_VEHICLE_WORDS = {
+    "car": "car_van", "van": "car_van",
+    "motorbike": "motorbike", "motorcycle": "motorbike", "moped": "motorbike",
+    "bicycle": "bicycle", "bike": "bicycle", "ebike": "bicycle",
+    "e-bike": "bicycle", "cycle": "bicycle",
+}
 
-    Returns a record dict, or None if the text isn't a mileage entry.
-    """
-    match = _MILES_RE.search(body) or _BARE_NUMBER_RE.match(body)
-    if not match:
+# Above this, a single weekly entry is flagged as "unusually high" for confirmation.
+_HIGH_WEEKLY_MILES = 1000
+
+
+def _vehicle_from_word(word: str | None) -> str | None:
+    if not word:
         return None
-    miles = float(match.group(1))
-    if miles <= 0 or miles > 2000:  # sanity bound for a single entry
-        return None
+    return _VEHICLE_WORDS.get(word.lower().replace(" ", ""))
+
+
+def _base_record(miles: float, vehicle_hint: str | None, monthly: bool) -> dict:
+    note = ("User-entered monthly mileage." if monthly
+            else "User-entered weekly mileage.")
     return {
         "record_type": "mileage",
         "platform_or_vendor": "",
         "category": "mileage",
         "amount": None,
         "miles": miles,
+        "vehicle_hint": vehicle_hint,
         "record_date": _today(),
-        "confidence": 1.0,            # the user typed it, but...
-        "source_hint": "user_estimate",  # ...it's self-reported, so label it as such
-        "notes": "User-entered weekly mileage. Add an odometer/route photo for stronger evidence.",
+        "confidence": 1.0,
+        "source_hint": "user_estimate",
+        "notes": note + " Add an odometer/route photo for stronger evidence.",
     }
+
+
+def parse_mileage_text(body: str) -> dict | None:
+    """Rules-based mileage parse (no API). Handles the Flow B input shapes:
+
+    "120 miles"                      -> single
+    "80 miles car"                   -> single, vehicle tagged
+    "80 miles car, 20 miles bike"    -> split (multiple segments)
+    "500 miles this month"           -> monthly flag
+    "150 miles total but 100 delivery" -> only the delivery miles count
+
+    Returns a dict whose "kind" is "single" or "split", or None if the text
+    isn't a mileage entry. Adds "monthly" and "too_high" flags for the caller.
+    """
+    low = body.lower()
+    monthly = "month" in low
+
+    # Personal + delivery: log only the business/delivery portion.
+    # e.g. "150 miles total but 100 delivery" / "100 of 150 were delivery".
+    if "deliver" in low and ("total" in low or " of " in low or "but" in low):
+        nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", low)]
+        if nums:
+            business = min(nums) if len(nums) >= 2 else nums[0]
+            total = max(nums) if len(nums) >= 2 else nums[0]
+            rec = _base_record(business, None, monthly)
+            rec["kind"] = "single"
+            rec["monthly"] = monthly
+            rec["too_high"] = business > _HIGH_WEEKLY_MILES and not monthly
+            rec["personal_excluded"] = max(0.0, total - business)
+            rec["notes"] = (f"User reported {total:.0f} total miles, "
+                            f"{business:.0f} for delivery. Logged delivery miles only.")
+            return rec
+
+    # Split mileage: comma/and-separated segments that each name a vehicle.
+    parts = re.split(r"\s*(?:,|;|\band\b|\+)\s*", body.strip())
+    segments: list[dict] = []
+    for part in parts:
+        m = _SEGMENT_RE.search(part)
+        if not m or not m.group(1):
+            continue
+        miles = float(m.group(1))
+        if miles <= 0 or miles > 5000:
+            continue
+        segments.append({"miles": miles, "vehicle_hint": _vehicle_from_word(m.group(2))})
+
+    tagged = [s for s in segments if s["vehicle_hint"]]
+    if len(segments) >= 2 and len(tagged) >= 2:
+        total = sum(s["miles"] for s in segments)
+        return {
+            "kind": "split",
+            "monthly": monthly,
+            "too_high": False,  # split totals aren't treated as a single-entry anomaly
+            "segments": segments,
+            "miles": total,
+            "record_date": _today(),
+            "confidence": 1.0,
+            "source_hint": "user_estimate",
+        }
+
+    # Single entry (optionally vehicle-tagged): "120 miles" / "80 miles car".
+    match = _MILES_RE.search(body) or _BARE_NUMBER_RE.match(body)
+    if not match:
+        return None
+    miles = float(match.group(1))
+    if miles <= 0 or miles > 5000:
+        return None
+    vehicle_hint = segments[0]["vehicle_hint"] if segments else None
+    rec = _base_record(miles, vehicle_hint, monthly)
+    rec["kind"] = "single"
+    rec["monthly"] = monthly
+    rec["too_high"] = miles > _HIGH_WEEKLY_MILES and not monthly
+    rec["personal_excluded"] = None
+    return rec

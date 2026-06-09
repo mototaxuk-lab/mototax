@@ -20,7 +20,7 @@ VEHICLE_RATES: dict[str, tuple[float, float, float | None]] = {
 # and the most conservative (highest) rate.
 DEFAULT_VEHICLE = "car_van"
 
-VEHICLE_LABELS = {"car_van": "car/van", "motorbike": "motorbike", "bicycle": "bike"}
+VEHICLE_LABELS = {"car_van": "Car / van", "motorbike": "Motorbike / moped", "bicycle": "Bicycle / e-bike"}
 VEHICLE_EMOJI = {"car_van": "🚗", "motorbike": "🏍️", "bicycle": "🚲"}
 
 
