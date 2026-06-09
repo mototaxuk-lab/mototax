@@ -122,6 +122,25 @@ def earnings_summary(db: Session, user: User) -> str:
     return "\n".join(lines)
 
 
+def expense_summary(db: Session, user: User) -> str:
+    """Flow E1 summary after confirming expenses: this-week expenses listed."""
+    import datetime as dt
+    week_ago = (dt.date.today() - dt.timedelta(days=7)).isoformat()
+    rows = [
+        r for r in _exportable(db, user.id)
+        if r.record_type == "expense" and (r.record_date or "") >= week_ago
+    ]
+    lines = ["Expense added ✅\n", "This week's expenses for accountant review:"]
+    total = 0.0
+    for r in sorted(rows, key=lambda x: x.id):
+        label = r.platform_or_vendor or r.category or "Expense"
+        total += r.amount or 0.0
+        lines.append(f"{label}: £{(r.amount or 0):,.2f}")
+    if len(rows) > 1:
+        lines.append(f"\nTotal expenses logged: £{total:,.2f}")
+    return "\n".join(lines)
+
+
 def vehicles_overview(db: Session, user: User) -> str:
     """The 'vehicles' command: a per-vehicle tab of miles and deduction."""
     by_vehicle = _miles_by_vehicle(_exportable(db, user.id), user.vehicle_type)

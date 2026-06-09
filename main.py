@@ -419,6 +419,21 @@ def _handle_media(db, user, number, params, num_media) -> None:
             wa.send_whatsapp(number, _confirmation_prompt(data, user))
 
 
+def _is_new_loggable(body: str) -> str | None:
+    """If `body` clearly starts a brand-new entry, return its type, else None.
+    Used so a half-finished draft (e.g. 'which platform?') doesn't swallow it.
+    A lone amount does NOT count — that may be the answer the draft is waiting for."""
+    if extract.parse_mileage_text(body):
+        return "mileage"
+    ex = extract.parse_expense_text(body)
+    if ex and not ex["amount_missing"]:
+        return "expense"
+    en = extract.parse_earnings_text(body)
+    if en and not en["platform_missing"]:  # has an explicit platform
+        return "earnings"
+    return None
+
+
 def _handle_text(db, user, number, body) -> None:
     low = body.lower().strip()
 
@@ -491,11 +506,46 @@ def _handle_text(db, user, number, body) -> None:
             db.commit()
             wa.send_whatsapp(number, "Deleted.\n\nNo earnings record was saved.")
             return
-        awaiting_plat_text.platform_or_vendor = body.strip()[:64]
-        awaiting_plat_text.confirmation_status = "pending"
-        db.commit()
-        wa.send_whatsapp(number, _income_prompt(awaiting_plat_text, user))
-        return
+        if _is_new_loggable(body):  # a fresh entry — abandon this half-finished draft
+            awaiting_plat_text.confirmation_status = "rejected"
+            db.commit()
+            # fall through to normal routing below
+        else:
+            awaiting_plat_text.platform_or_vendor = body.strip()[:64]
+            awaiting_plat_text.confirmation_status = "pending"
+            db.commit()
+            wa.send_whatsapp(number, _income_prompt(awaiting_plat_text, user))
+            return
+
+    # If a typed expense is waiting for its amount (Flow E1 §6), this is it.
+    awaiting_exp_amt = (
+        db.query(Record)
+        .filter_by(user_id=user.id, confirmation_status="awaiting_expense_amount")
+        .order_by(Record.created_at.desc())
+        .first()
+    )
+    if awaiting_exp_amt:
+        if low in ("cancel", "stop", "delete"):
+            awaiting_exp_amt.confirmation_status = "rejected"
+            db.commit()
+            wa.send_whatsapp(number, "Deleted. This expense will not be included in your records.")
+            return
+        if _is_new_loggable(body):  # a fresh entry — abandon this half-finished draft
+            awaiting_exp_amt.confirmation_status = "rejected"
+            db.commit()
+            # fall through to normal routing below
+        else:
+            amount = _parse_amount(body)
+            if amount is None:
+                wa.send_whatsapp(number, f"How much was the "
+                                 f"{awaiting_exp_amt.platform_or_vendor.lower()}? "
+                                 "Send it like \"£45\".")
+                return
+            awaiting_exp_amt.amount = amount
+            awaiting_exp_amt.confirmation_status = "pending"
+            db.commit()
+            wa.send_whatsapp(number, _expense_prompt(awaiting_exp_amt.platform_or_vendor, amount))
+            return
 
     # If an income entry is waiting for its platform (Flow D), this is the answer.
     # Picker numbering: 1..N platforms, N+1 = Other, N+2 = Delete.
@@ -516,6 +566,10 @@ def _handle_text(db, user, number, body) -> None:
             db.commit()
             wa.send_whatsapp(number, "Please type the platform name.")
             return
+        elif _is_new_loggable(body):  # a fresh entry — abandon this draft
+            awaiting_plat.confirmation_status = "rejected"
+            db.commit()
+            platform = None  # fall through to normal routing below
         else:
             platform = extract._find_platform(body)
             if platform is None:
@@ -523,11 +577,12 @@ def _handle_text(db, user, number, body) -> None:
                 wa.send_whatsapp(number, _platform_picker(
                     "Sorry, I didn't catch that. Which platform was this from?"))
                 return
-        awaiting_plat.platform_or_vendor = platform[:64]
-        awaiting_plat.confirmation_status = "pending"
-        db.commit()
-        wa.send_whatsapp(number, _income_prompt(awaiting_plat, user))
-        return
+        if platform is not None:
+            awaiting_plat.platform_or_vendor = platform[:64]
+            awaiting_plat.confirmation_status = "pending"
+            db.commit()
+            wa.send_whatsapp(number, _income_prompt(awaiting_plat, user))
+            return
 
     # Flow C: vehicle/settings menu, in-flow states, and NL vehicle intents.
     # Checked after editing/awaiting (Flow B drafts win) but before the confirm
@@ -537,6 +592,19 @@ def _handle_text(db, user, number, body) -> None:
 
     if low in ("vehicles", "my vehicles"):
         wa.send_whatsapp(number, export.vehicles_overview(db, user))
+        return
+
+    if low in ("expense", "expenses", "add expense", "add expenses"):
+        wa.send_whatsapp(
+            number,
+            "You can also add courier-related expenses.\n\n"
+            "Type it like:\n"
+            "\"Delivery bag £45\"\n"
+            "\"Phone mount £12\"\n"
+            "\"Parking £8\"\n\n"
+            "Confirmed expenses will be included in your record pack for accountant "
+            "review.",
+        )
         return
 
     if low.startswith("use ") or low.startswith("switch to ") or low.startswith("switch "):
@@ -567,15 +635,18 @@ def _handle_text(db, user, number, body) -> None:
             return
         has_mileage = any(r.record_type == "mileage" for r in pending)
         has_income = any(r.record_type == "income" for r in pending)
+        has_expense = any(r.record_type == "expense" for r in pending)
         for rec in pending:
             rec.confirmation_status = "estimated" if rec.source_type == "user_estimate" else "confirmed"
             rec.confirmed_at = now()
-            # We never retain raw earnings screenshots — only the confirmed figures.
-            if rec.record_type == "income":
+            # We never retain raw screenshots/receipts — only the confirmed figures.
+            if rec.record_type in ("income", "expense"):
                 rec.original_media_url = ""
         db.commit()
         if has_income:
             wa.send_whatsapp(number, export.earnings_summary(db, user))
+        elif has_expense:
+            wa.send_whatsapp(number, export.expense_summary(db, user))
         elif has_mileage:
             # We just asked for earnings, so read the next bare number as earnings.
             user.expecting = "earnings"
@@ -598,20 +669,26 @@ def _handle_text(db, user, number, body) -> None:
             return
         rec.confirmation_status = "editing"
         db.commit()
-        prompt = ("Send the corrected mileage (e.g. \"115 miles\")."
-                  if rec.record_type == "mileage"
-                  else "Send the corrected amount (e.g. \"£42\").")
+        if rec.record_type == "mileage":
+            prompt = "Send the corrected mileage (e.g. \"115 miles\")."
+        elif rec.record_type == "expense":
+            prompt = "Send the corrected expense (e.g. \"Delivery bag £39.99\")."
+        else:
+            prompt = "Send the corrected amount (e.g. \"£42\")."
         wa.send_whatsapp(number, prompt)
         return
 
     if low in ("3", "delete", "discard", "no", "n"):
         pending = _all_pending(db, user.id)
         had_mileage = any(r.record_type == "mileage" for r in pending)
+        had_expense = any(r.record_type == "expense" for r in pending)
         for rec in pending:
             rec.confirmation_status = "rejected"
         db.commit()
         if had_mileage:
             wa.send_whatsapp(number, "Deleted. No mileage record was saved for this week.")
+        elif had_expense:
+            wa.send_whatsapp(number, "Deleted. This expense will not be included in your records.")
         else:
             wa.send_whatsapp(number, "Deleted. Send it again or type the correct value.")
         return
@@ -657,6 +734,13 @@ def _handle_text(db, user, number, body) -> None:
             })
             return
         _handle_mileage_entry(db, user, number, mileage)
+        return
+
+    # Try to read it as a typed expense (Flow E1): "Delivery bag £45" etc.
+    # Runs before earnings so a described item isn't mistaken for income.
+    expense = extract.parse_expense_text(body)
+    if expense:
+        _handle_expense_entry(db, user, number, expense)
         return
 
     # Try to read it as manual earnings (Flow D): "Uber Eats £320" etc.
@@ -853,6 +937,56 @@ def _income_prompt(rec: Record, user, period: str = "this week") -> str:
     )
 
 
+# --- Flow E1: typed expenses -------------------------------------------------
+
+def _handle_expense_entry(db, user, number, parsed: dict) -> None:
+    """Create draft expense record(s) from typed text and prompt to confirm.
+
+    Receipt images are never stored — only the typed figures (receipt_image_stored
+    is always no, so original_media_url stays empty)."""
+    entries = parsed["entries"]
+
+    # Description given but no amount yet (Flow E1 §6) — ask for the amount.
+    if parsed["amount_missing"]:
+        e = entries[0]
+        db.add(Record(
+            user_id=user.id, record_type="expense", record_date=extract._today(),
+            category=e["category"], platform_or_vendor=e["description"][:64],
+            amount=None, source_type="manual_entry", confidence=1.0,
+            confirmation_status="awaiting_expense_amount", notes="Typed expense.",
+        ))
+        db.commit()
+        wa.send_whatsapp(number, f"How much was the {e['description'].lower()}?")
+        return
+
+    for e in entries:
+        db.add(Record(
+            user_id=user.id, record_type="expense", record_date=extract._today(),
+            category=e["category"], platform_or_vendor=e["description"][:64],
+            amount=e["amount"], source_type="manual_entry", confidence=1.0,
+            confirmation_status="pending", notes="Typed expense.",
+        ))
+    db.commit()
+
+    if parsed["kind"] == "multi":
+        lines = ["I logged these expenses for accountant review:\n"]
+        total = 0.0
+        for e in entries:
+            total += e["amount"]
+            lines.append(f"{e['description']}: £{e['amount']:.2f}")
+        lines.append(f"\nTotal expenses logged: £{total:.2f}")
+        lines.append(f"\nConfirm?\n{_OPTIONS_FOOTER}")
+        wa.send_whatsapp(number, "\n".join(lines))
+    else:
+        e = entries[0]
+        wa.send_whatsapp(number, _expense_prompt(e["description"], e["amount"]))
+
+
+def _expense_prompt(description: str, amount: float, updated: bool = False) -> str:
+    lead = "Updated to:" if updated else "Logged for accountant review:"
+    return (f"{lead}\n\n{description} — £{amount:.2f}\n\nConfirm?\n{_OPTIONS_FOOTER}")
+
+
 _VEHICLE_ORDER = ("car_van", "motorbike", "bicycle")
 
 
@@ -972,6 +1106,13 @@ def _record_prompt(rec: Record, user, updated: bool = False) -> str:
     if rec.record_type == "mileage":
         return _mileage_prompt(rec.miles or 0, rec.vehicle_type or user.vehicle_type, user, updated=updated)
 
+    if rec.record_type == "expense":
+        return _expense_prompt(rec.platform_or_vendor or rec.category,
+                               rec.amount or 0, updated=updated)
+
+    if rec.record_type == "income":
+        return _income_prompt(rec, user)
+
     amount = f"£{rec.amount:.2f}" if rec.amount is not None else "£?"
     vendor = rec.platform_or_vendor or rec.category
     lead = "Updated" if updated else "Detected"
@@ -985,6 +1126,21 @@ def _apply_edit(rec: Record, body: str) -> bool:
         if not parsed:
             return False
         rec.miles = parsed["miles"]
+        return True
+
+    if rec.record_type == "expense":
+        # Allow re-typing the whole "description £amount", or just a new amount.
+        parsed = extract.parse_expense_text(body)
+        if parsed and not parsed["amount_missing"]:
+            e = parsed["entries"][0]
+            rec.platform_or_vendor = e["description"][:64]
+            rec.amount = e["amount"]
+            rec.category = e["category"]
+            return True
+        amount = _parse_amount(body)
+        if amount is None:
+            return False
+        rec.amount = amount
         return True
 
     amount = _parse_amount(body)

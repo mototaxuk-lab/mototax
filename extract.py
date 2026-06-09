@@ -325,3 +325,100 @@ def parse_earnings_text(body: str) -> dict | None:
         "monthly": monthly,
         "platform_missing": len(entries) == 1 and entries[0]["platform"] is None,
     }
+
+
+# --- Typed expense parsing (Flow E1) -----------------------------------------
+
+# Keyword → category guess (for accountant review, not tax advice). First match wins.
+_EXPENSE_CATEGORIES = [
+    ("delivery equipment", ("bag", "rucksack", "backpack", "thermal", "insulated",
+                            "mount", "holder", "cradle", "hi-vis", "hivis", "jacket",
+                            "helmet", "lock", "pump")),
+    ("phone/accessory", ("phone", "charger", "cable", "powerbank", "power bank",
+                         "case", "screen", "adapter")),
+    ("phone/data", ("data", "sim", "airtime", "mobile plan", "phone bill")),
+    ("parking/tolls", ("parking", "toll", "tolls", "congestion", "dartford", "ulez")),
+    ("accountant/admin", ("accountant", "accounting", "admin", "subscription",
+                          "software", "app fee")),
+]
+
+# Words that aren't part of an expense description (periods/filler).
+_NON_DESC_WORDS = {
+    "this", "that", "the", "a", "an", "for", "of", "on", "in", "my", "me", "i",
+    "week", "weeks", "month", "months", "today", "yesterday", "last", "spent",
+    "paid", "bought", "buy", "cost", "costs", "was", "were", "it", "and",
+}
+
+
+def guess_expense_category(description: str) -> str:
+    t = description.lower()
+    for category, words in _EXPENSE_CATEGORIES:
+        if any(w in t for w in words):
+            return category
+    return "review_required"
+
+
+def _clean_description(text: str) -> str:
+    """Strip amount tokens, currency words and filler, leaving the description."""
+    t = _AMOUNT_GBP_RE.sub(" ", text)
+    t = _AMOUNT_WORD_RE.sub(" ", t)
+    t = re.sub(r"\d+(?:\.\d{1,2})?", " ", t)
+    t = re.sub(r"[£,;:]", " ", t)
+    words = [w for w in t.split() if w.lower().strip(".") not in _NON_DESC_WORDS]
+    return " ".join(words).strip()
+
+
+def _has_real_words(description: str) -> bool:
+    return any(c.isalpha() for c in description)
+
+
+def parse_expense_text(body: str) -> dict | None:
+    """Rules-based typed-expense parse (Flow E1). Handles:
+
+    "Delivery bag £45"                              -> single
+    "Delivery bag £45, phone mount £12, parking £8" -> multi
+    "Delivery bag"                                  -> single, amount missing
+
+    Returns a dict with "entries" [{description, amount, category}], "kind" and
+    "amount_missing" — or None if it isn't a typed expense (earnings/platforms
+    and pure amounts are left for the earnings parser).
+    """
+    low = body.lower()
+    # Platforms and earnings words belong to Flow D, not here.
+    if _find_platform(body) or any(k in low for k in _EARN_KEYWORDS):
+        return None
+
+    parts = re.split(r"\s*(?:,|;|\band\b|\+)\s*", body.strip())
+    entries: list[dict] = []
+    descriptions_without_amount: list[str] = []
+    for part in parts:
+        if not part.strip():
+            continue
+        amount = _find_amount(part, require_symbol=False)
+        desc = _clean_description(part)
+        if amount is not None and amount > 0 and _has_real_words(desc):
+            entries.append({"description": desc, "amount": amount,
+                            "category": guess_expense_category(desc)})
+        elif amount is None and _has_real_words(desc):
+            descriptions_without_amount.append(desc)
+
+    if entries:
+        return {
+            "kind": "multi" if len(entries) > 1 else "single",
+            "entries": entries,
+            "amount_missing": False,
+        }
+
+    # No amount anywhere: only treat as an expense if the description clearly names
+    # a known expense item, to avoid swallowing chit-chat. (The caller may also
+    # force this path when it has just prompted for an expense.)
+    if len(descriptions_without_amount) == 1:
+        desc = descriptions_without_amount[0]
+        if guess_expense_category(desc) != "review_required":
+            return {
+                "kind": "single",
+                "entries": [{"description": desc, "amount": None,
+                             "category": guess_expense_category(desc)}],
+                "amount_missing": True,
+            }
+    return None
