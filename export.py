@@ -103,6 +103,140 @@ def weekly_summary(db: Session, user: User) -> str:
     return "\n".join(lines)
 
 
+# --- Flow F: weekly / monthly courier summary --------------------------------
+
+import datetime as _dt
+
+
+def _period_range(monthly: bool, ref: "_dt.date | None" = None):
+    d = ref or _dt.date.today()
+    if monthly:
+        start = d.replace(day=1)
+        nxt = (start.replace(year=start.year + 1, month=1) if start.month == 12
+               else start.replace(month=start.month + 1))
+        return start, nxt - _dt.timedelta(days=1)
+    start = d - _dt.timedelta(days=d.weekday())
+    return start, start + _dt.timedelta(days=6)
+
+
+def _fmt(d: "_dt.date") -> str:
+    return f"{d.day} {d:%b %Y}"
+
+
+def _streak(all_dates: list[str], monthly: bool) -> int:
+    """Count consecutive periods (back from now) with at least one record."""
+    count = 0
+    ref = _dt.date.today()
+    for _ in range(60):
+        start, end = _period_range(monthly, ref)
+        s, e = start.isoformat(), end.isoformat()
+        if any(s <= d <= e for d in all_dates):
+            count += 1
+            ref = start - _dt.timedelta(days=1)
+        else:
+            break
+    return count
+
+
+def summary(db: Session, user: User) -> str:
+    """Flow F summary for the user's current period (weekly or monthly)."""
+    monthly = (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
+    start, end = _period_range(monthly)
+    s_iso, e_iso = start.isoformat(), end.isoformat()
+    period_line = f"Period: {_fmt(start)} – {_fmt(end)}"
+    title = "This month's" if monthly else "This week's"
+
+    all_rows = _exportable(db, user.id)
+    rows = [r for r in all_rows if s_iso <= (r.record_date or "") <= e_iso]
+    income = [r for r in rows if r.record_type == "income"]
+    mileage = [r for r in rows if r.record_type == "mileage"]
+    expenses = [r for r in rows if r.record_type == "expense"]
+
+    # Empty period (§18).
+    if not rows:
+        return (f"No records found for this period yet.\n\n{period_line}\n\n"
+                "You can add mileage, earnings or expenses to start your record.")
+
+    earnings_total = sum(r.amount or 0 for r in income)
+    by_vehicle = _miles_by_vehicle(mileage, user.vehicle_type)
+    miles_total = sum(by_vehicle.values())
+    deduction = sum(tax.mileage_deduction(m, vt) for vt, m in by_vehicle.items())
+    benefit = tax.tax_benefit(deduction, user.tax_rate) if user.tax_rate else 0.0
+    streak = _streak([r.record_date for r in all_rows], monthly)
+    streak_unit = "month" if monthly else "week"
+
+    def _by_platform():
+        agg: dict[str, float] = {}
+        for r in income:
+            agg[r.platform_or_vendor or "Other"] = agg.get(r.platform_or_vendor or "Other", 0.0) + (r.amount or 0)
+        return sorted(agg.items(), key=lambda x: -x[1])
+
+    # Earnings-only (§5/§6).
+    if income and not mileage:
+        lines = [f"{title} earnings record\n", period_line, ""]
+        ranked = _by_platform()
+        if len(ranked) > 1:
+            for i, (name, amt) in enumerate(ranked, 1):
+                lines.append(f"{i}. {name}: £{amt:,.2f}")
+            lines.append(f"\nTotal earnings logged: £{earnings_total:,.2f}")
+        else:
+            lines.append(f"Earnings logged: £{earnings_total:,.2f}")
+        lines.append("\nAdd mileage if you want your mileage deduction and estimated "
+                     "real take-home.")
+        return "\n".join(lines)
+
+    # Mileage-only (§3/§4).
+    if mileage and not income:
+        lines = [f"{title} mileage record\n", period_line, "",
+                 f"Miles logged: {miles_total:,.0f}"]
+        used = {vt: m for vt, m in by_vehicle.items() if m > 0}
+        if len(used) > 1:
+            for vt, m in sorted(used.items(), key=lambda x: -x[1]):
+                lines.append(f"  {tax.label(vt)}: {m:,.0f} mi — "
+                             f"£{tax.mileage_deduction(m, vt):,.2f} deduction")
+        else:
+            vt = next(iter(used), tax.normalise_vehicle(user.vehicle_type))
+            lines.append(f"Vehicle: {tax.label(vt)}")
+        lines.append(f"Mileage deduction captured: £{deduction:,.2f}")
+        if user.tax_rate:
+            lines.append(f"Estimated tax benefit: up to ~£{benefit:,.2f}")
+        if streak > 1:
+            lines.append(f"\nStreak: {streak} {streak_unit}s logged 🔥")
+        lines.append("\nAdd earnings if you want your estimated real take-home.")
+        return "\n".join(lines)
+
+    # Full summary (§1/§2): lead with estimated real take-home.
+    estimated_tax = max(0.0, earnings_total - deduction) * (user.tax_rate or 0.0)
+    take_home = earnings_total - estimated_tax
+    lines = [f"{title} courier summary\n", period_line, ""]
+
+    # Mixed-period warning (§10): mileage and earnings on different frequencies.
+    freqs = {r.entry_frequency for r in (income + mileage) if r.entry_frequency}
+    if len(freqs) > 1:
+        lines.append("⚠️ Your records use different periods (mileage vs earnings), "
+                     "so the take-home estimate is less precise.\n")
+
+    lines.append(f"Estimated real take-home: ~£{take_home:,.2f}\n")
+    lines.append(f"Earnings logged: £{earnings_total:,.2f}")
+    lines.append(f"Miles logged: {miles_total:,.0f}")
+    used = {vt: m for vt, m in by_vehicle.items() if m > 0}
+    if len(used) > 1:
+        for vt, m in sorted(used.items(), key=lambda x: -x[1]):
+            lines.append(f"  {tax.label(vt)}: {m:,.0f} mi — "
+                         f"£{tax.mileage_deduction(m, vt):,.2f}")
+    lines.append(f"Mileage deduction captured: £{deduction:,.2f}")
+    if user.tax_rate:
+        lines.append(f"Estimated tax benefit: up to ~£{benefit:,.2f}")
+    if expenses:
+        lines.append("\nExpenses logged for accountant review:")
+        for r in expenses:
+            lines.append(f"• {r.platform_or_vendor or r.category}: £{(r.amount or 0):,.2f}")
+    if streak > 1:
+        lines.append(f"\nStreak: {streak} {streak_unit}s logged 🔥")
+    lines.append("\nEstimates only, based on what you've confirmed — not tax advice.")
+    return "\n".join(lines)
+
+
 def earnings_summary(db: Session, user: User) -> str:
     """Flow D summary after confirming earnings: this-week totals per platform."""
     import datetime as dt
