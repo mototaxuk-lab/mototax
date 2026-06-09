@@ -98,12 +98,12 @@ def earnings_summary(db: Session, user: User) -> str:
     """Flow D summary after confirming earnings: this-week totals per platform."""
     import datetime as dt
     week_ago = (dt.date.today() - dt.timedelta(days=7)).isoformat()
-    rows = [
-        r for r in _exportable(db, user.id)
-        if r.record_type == "income" and (r.record_date or "") >= week_ago
-    ]
+    week_rows = [r for r in _exportable(db, user.id) if (r.record_date or "") >= week_ago]
+
     by_platform: dict[str, float] = {}
-    for r in rows:
+    for r in week_rows:
+        if r.record_type != "income":
+            continue
         name = r.platform_or_vendor or "Other"
         by_platform[name] = by_platform.get(name, 0.0) + (r.amount or 0.0)
 
@@ -112,8 +112,13 @@ def earnings_summary(db: Session, user: User) -> str:
         lines.append(f"{name}: £{amt:,.2f}")
     total = sum(by_platform.values())
     lines.append(f"\nTotal earnings logged: £{total:,.2f}")
-    lines.append("\nAdd mileage if you want your mileage deduction and estimated "
-                 "real take-home.")
+
+    # Only nudge for mileage if none has been logged this week — otherwise the
+    # user just confirmed it and being asked again is confusing.
+    has_mileage = any(r.record_type == "mileage" for r in week_rows)
+    if not has_mileage:
+        lines.append("\nAdd mileage if you want your mileage deduction and estimated "
+                     "real take-home.")
     return "\n".join(lines)
 
 
