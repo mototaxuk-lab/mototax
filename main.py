@@ -376,9 +376,16 @@ def _handle_media(db, user, number, params, num_media) -> None:
             wa.send_whatsapp(number, "Sorry, I couldn't read that one. Try a clearer photo?")
             continue
 
-        source = "screenshot" if data["record_type"] == "income" else "receipt_ocr"
+        # Mileage is typed-only — we don't read it from photos. If a photo looks
+        # like an odometer/mileage shot, ask the user to type it instead.
         if data["record_type"] == "mileage":
-            source = "odometer_photo"
+            wa.send_whatsapp(
+                number,
+                "I read photos for earnings screenshots and expense receipts only.\n\n"
+                "For mileage, just type it, e.g. \"120 miles\".")
+            continue
+
+        source = "screenshot" if data["record_type"] == "income" else "receipt_ocr"
 
         # Flow E2: a receipt we can't read clearly creates no record — the user is
         # asked to type the expense instead, and the image is never stored.
