@@ -124,3 +124,9 @@ git add README.md && git commit -m "docs: sync README version" && git push
 To release a new version: add a `## [x.y.z] — YYYY-MM-DD` section (with a one-
 line summary under it) to `CHANGELOG.md`, then commit and push. You can also run
 the sync manually any time: `python scripts/sync_readme_version.py`.
+
+**Enforcement:** a GitHub Action (`.github/workflows/changelog.yml`) fails any PR
+that changes product code without updating `CHANGELOG.md`. For a PR that genuinely
+needs no entry (refactor, CI, pure docs, harness/tooling), apply the
+**`no-changelog`** label. Tooling paths (`chat.py`, `scripts/`, tests) are exempt
+automatically.
