@@ -22,13 +22,35 @@ deployed on Railway.
   sources. If 45p is correct, every deduction shown is overstated by ~22%. A parked
   `rate-config-refactor` branch centralises rates and adds a `RATE_CONFIRMED` gate but
   has not been merged. **Do not launch on the unverified value.**
-- **Shared "change period" picker** (last week / custom range) — entries currently use
-  the current period only.
+- **Period on new entries** still defaults to the current week/month. A period picker now
+  exists in the mileage **edit** menu (preset weeks/months + custom range); offering it at
+  log time for other record types is still open.
 - **Twilio trial cap.** Onboarding now sends many messages (Terms/Privacy gate + setup);
   the Twilio trial account's 50-messages/day limit blocks replies once exceeded. Resolved
   by upgrading the Twilio account out of trial.
 - **Exports**: monthly/annual multi-CSV packs (partner note G) not yet built.
 - **"Real take-home" formula** in the weekly summary still needs a defined calculation.
+
+---
+
+## [0.5.0] — 2026-06-09
+
+Richer mileage edit menu, and a fix so editing no longer loses the period.
+
+### Added
+- **Edit a mileage record's vehicle and period**, not just the mileage. Replying `2`
+  (edit) on a mileage record now opens a sub-menu:
+  - **Mileage** — send a corrected value (or just send it directly, as before).
+  - **Vehicle** — switch between car/van, motorbike, or bicycle; the deduction
+    recalculates at the new rate.
+  - **Period** — pick this/last week, this/last month, or send a custom range
+    (e.g. "1 Jun to 30 Jun"); the input frequency (weekly/monthly) updates to match.
+
+### Fixed
+- **Editing a mileage entry no longer resets its period.** The re-prompt after an edit
+  now shows the record's stored period and input type instead of recomputing the current
+  week — previously a monthly "1–30 Jun" entry would display as the current week after any
+  edit.
 
 ---
 
@@ -152,6 +174,7 @@ Initial MVP backend and first Railway deployment.
 ---
 
 [Unreleased]: https://github.com/mototaxuk-lab/mototax/compare/a17c49b...HEAD
+[0.5.0]: https://github.com/mototaxuk-lab/mototax/compare/e19df90...HEAD
 [0.4.0]: https://github.com/mototaxuk-lab/mototax/pull/7
 [0.3.1]: https://github.com/mototaxuk-lab/mototax/compare/a14f6dc...9803458
 [0.3.0]: https://github.com/mototaxuk-lab/mototax/pull/1

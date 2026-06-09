@@ -658,8 +658,13 @@ def _handle_text(db, user, number, body) -> None:
     if editing:
         if low in ("cancel", "stop"):
             editing.confirmation_status = "pending"
+            user.expecting = None
             db.commit()
             wa.send_whatsapp(number, "Edit cancelled.\n\n" + _record_prompt(editing, user))
+            return
+        if editing.record_type == "mileage":
+            # Mileage has a richer edit sub-menu (mileage / vehicle / period).
+            _handle_mileage_edit(db, user, number, editing, body, low, expecting)
             return
         if _apply_edit(editing, body):
             editing.confirmation_status = "pending"
@@ -959,10 +964,14 @@ def _handle_text(db, user, number, body) -> None:
             wa.send_whatsapp(number, "Nothing waiting to edit. Send a photo or your mileage.")
             return
         rec.confirmation_status = "editing"
-        db.commit()
         if rec.record_type == "mileage":
-            prompt = "Send the corrected mileage (e.g. \"115 miles\")."
-        elif rec.record_type == "expense":
+            # Mileage offers a sub-menu: change mileage, vehicle, or period.
+            user.expecting = "edit_menu"
+            db.commit()
+            wa.send_whatsapp(number, _edit_menu_prompt(rec))
+            return
+        db.commit()
+        if rec.record_type == "expense":
             prompt = "Send the corrected expense (e.g. \"Delivery bag £39.99\")."
         else:
             prompt = "Send the corrected amount (e.g. \"£42\")."
@@ -1393,6 +1402,178 @@ def _which_vehicle_prompt(options: list[str], active: str) -> str:
     return "\n".join(lines)
 
 
+# --- Mileage edit sub-menu (change mileage / vehicle / period) ----------------
+
+def _edit_menu_prompt(rec: Record) -> str:
+    """Top-level menu shown when the user edits a mileage record."""
+    miles = rec.miles or 0
+    veh = _VEHICLE_LABELS[tax.normalise_vehicle(rec.vehicle_type)]
+    period = _stored_period_line(rec.period_start, rec.period_end)
+    period = period.removeprefix("Period: ") if period else "not set"
+    return (
+        "What would you like to change?\n\n"
+        f"1. Mileage — currently {miles:.0f} miles\n"
+        f"2. Vehicle — currently {veh}\n"
+        f"3. Period — currently {period}\n\n"
+        "Reply 1, 2 or 3. (Or just send the corrected mileage, e.g. \"115 miles\".)"
+    )
+
+
+def _edit_vehicle_prompt(rec: Record) -> str:
+    current = tax.normalise_vehicle(rec.vehicle_type)
+    lines = ["Which vehicle were these miles on?\n"]
+    for i, vt in enumerate(_VEHICLE_ORDER, 1):
+        mark = " (current)" if vt == current else ""
+        lines.append(f"{i}. {tax.emoji(vt)} {_VEHICLE_LABELS[vt]}{mark}")
+    lines.append("\nReply 1, 2 or 3.")
+    return "\n".join(lines)
+
+
+def _period_choices() -> list[tuple[str, dt.date, dt.date, str]]:
+    """Preset period options offered when editing a record's period."""
+    today = dt.date.today()
+    tw_s, tw_e = _period_range(False, today)
+    lw_s, lw_e = _period_range(False, today - dt.timedelta(days=7))
+    tm_s, tm_e = _period_range(True, today)
+    lm_s, lm_e = _period_range(True, tm_s - dt.timedelta(days=1))
+    return [
+        ("This week", tw_s, tw_e, "weekly"),
+        ("Last week", lw_s, lw_e, "weekly"),
+        ("This month", tm_s, tm_e, "monthly"),
+        ("Last month", lm_s, lm_e, "monthly"),
+    ]
+
+
+def _edit_period_prompt(rec: Record) -> str:
+    lines = ["Which period should this cover?\n"]
+    for i, (label, s, e, _f) in enumerate(_period_choices(), 1):
+        lines.append(f"{i}. {label} ({_fmt_period(s, e)})")
+    lines.append("\nReply 1–4, or send a custom range like \"1 Jun to 30 Jun\".")
+    return "\n".join(lines)
+
+
+_MONTHS = {m.lower(): i for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
+
+
+def _parse_one_date(token: str, default_year: int) -> dt.date | None:
+    token = token.strip().lower().rstrip(",")
+    m = re.match(r"^(\d{1,2})[/.](\d{1,2})(?:[/.](\d{2,4}))?$", token)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), m.group(3)
+        year = default_year if not y else (2000 + int(y) if int(y) < 100 else int(y))
+        try:
+            return dt.date(year, mo, d)
+        except ValueError:
+            return None
+    m = re.match(r"^(\d{1,2})\s+([a-z]{3,})\.?(?:\s+(\d{4}))?$", token)
+    if m and m.group(2)[:3] in _MONTHS:
+        try:
+            return dt.date(int(m.group(3)) if m.group(3) else default_year,
+                           _MONTHS[m.group(2)[:3]], int(m.group(1)))
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_custom_period(text: str) -> tuple[dt.date, dt.date] | None:
+    """Parse 'DD Mon to DD Mon' or 'DD/MM to DD/MM' (and -, –, until) ranges."""
+    parts = re.split(r"\s+(?:to|until|through|[-–—])\s+", text.strip(), maxsplit=1)
+    if len(parts) != 2:
+        return None
+    year = dt.date.today().year
+    s = _parse_one_date(parts[0], year)
+    e = _parse_one_date(parts[1], year)
+    if s and e and s <= e:
+        return s, e
+    return None
+
+
+def _parse_period_choice(low: str, body: str):
+    """Return (start, end, frequency) for a period reply, or None."""
+    if low in ("1", "2", "3", "4"):
+        _label, s, e, freq = _period_choices()[int(low) - 1]
+        return s, e, freq
+    custom = _parse_custom_period(body)
+    if custom:
+        s, e = custom
+        return s, e, "monthly" if (e - s).days >= 27 else "weekly"
+    return None
+
+
+def _handle_mileage_edit(db, user, number, rec: Record, body: str, low: str,
+                         expecting: str | None) -> None:
+    """Drive the mileage edit sub-menu. Each step re-arms user.expecting until a
+    valid value is given, then returns the record to 'pending' and re-prompts."""
+    def _finish() -> None:
+        rec.confirmation_status = "pending"
+        db.commit()
+        wa.send_whatsapp(number, _record_prompt(rec, user, updated=True))
+
+    if expecting == "edit_vehicle":
+        chosen = _parse_vehicle(low)
+        if chosen is None:
+            user.expecting = "edit_vehicle"
+            db.commit()
+            wa.send_whatsapp(number, "Please reply 1, 2 or 3.\n\n" + _edit_vehicle_prompt(rec))
+            return
+        rec.vehicle_type = chosen
+        _finish()
+        return
+
+    if expecting == "edit_period":
+        picked = _parse_period_choice(low, body)
+        if picked is None:
+            user.expecting = "edit_period"
+            db.commit()
+            wa.send_whatsapp(number, "Sorry, I didn't catch that period.\n\n" + _edit_period_prompt(rec))
+            return
+        s, e, freq = picked
+        rec.period_start, rec.period_end, rec.entry_frequency = s.isoformat(), e.isoformat(), freq
+        _finish()
+        return
+
+    if expecting == "edit_mileage":
+        parsed = extract.parse_mileage_text(body)
+        if not parsed:
+            user.expecting = "edit_mileage"
+            db.commit()
+            wa.send_whatsapp(number, "Send the corrected mileage (e.g. \"115 miles\"), or type CANCEL.")
+            return
+        rec.miles = parsed["miles"]
+        _finish()
+        return
+
+    # Top of the menu (expecting == "edit_menu" or unset).
+    if low in ("1", "mileage", "miles"):
+        user.expecting = "edit_mileage"
+        db.commit()
+        wa.send_whatsapp(number, "Send the corrected mileage (e.g. \"115 miles\").")
+        return
+    if low in ("2", "vehicle"):
+        user.expecting = "edit_vehicle"
+        db.commit()
+        wa.send_whatsapp(number, _edit_vehicle_prompt(rec))
+        return
+    if low in ("3", "period", "dates", "date"):
+        user.expecting = "edit_period"
+        db.commit()
+        wa.send_whatsapp(number, _edit_period_prompt(rec))
+        return
+
+    # Shortcut: a corrected mileage value sent straight to the menu.
+    parsed = extract.parse_mileage_text(body)
+    if parsed:
+        rec.miles = parsed["miles"]
+        _finish()
+        return
+
+    user.expecting = "edit_menu"
+    db.commit()
+    wa.send_whatsapp(number, "Sorry, I didn't catch that.\n\n" + _edit_menu_prompt(rec))
+
+
 # Shown after every detected/updated record so the user can correct it.
 _OPTIONS_FOOTER = "Reply 1 to confirm, 2 to edit, or 3 to delete."
 
@@ -1423,15 +1604,33 @@ def _period_line(monthly: bool) -> str:
     return f"Period: {_fmt_period(start, end)}"
 
 
+def _stored_period_line(period_start: str | None, period_end: str | None) -> str | None:
+    """Period line built from a record's stored dates (not recomputed from today)."""
+    if period_start and period_end:
+        try:
+            return ("Period: " + _fmt_period(dt.date.fromisoformat(period_start),
+                                              dt.date.fromisoformat(period_end)))
+        except ValueError:
+            return None
+    return None
+
+
 def _mileage_prompt(miles: float, vehicle_type, user, updated: bool = False,
                     monthly: bool = False, personal_excluded: float | None = None,
-                    recommend_weekly: bool = False) -> str:
-    """Confirmation text for a mileage entry, with deduction + tax-benefit estimate."""
+                    recommend_weekly: bool = False,
+                    period_start: str | None = None,
+                    period_end: str | None = None) -> str:
+    """Confirmation text for a mileage entry, with deduction + tax-benefit estimate.
+
+    When `period_start`/`period_end` are given (e.g. re-prompting a stored record
+    after an edit), the period line reflects those dates rather than today's week.
+    """
     deduction = tax.mileage_deduction(miles, vehicle_type)
     lead = "Updated to" if updated else "I logged"
+    period_line = _stored_period_line(period_start, period_end) or _period_line(monthly)
     msg = (
         f"{lead} {miles:.0f} delivery miles.\n\n"
-        f"{_period_line(monthly)}\n"
+        f"{period_line}\n"
         f"Vehicle: {tax.label(vehicle_type)}"
         + ("\nInput type: monthly" if monthly else "")
         + f"\n\nEstimated mileage deduction: £{_money(deduction)}"
@@ -1500,7 +1699,10 @@ def _confirmation_prompt(data: dict, user) -> str:
 def _record_prompt(rec: Record, user, updated: bool = False) -> str:
     """Re-prompt built from a stored record (used after an edit or cancel)."""
     if rec.record_type == "mileage":
-        return _mileage_prompt(rec.miles or 0, rec.vehicle_type or user.vehicle_type, user, updated=updated)
+        return _mileage_prompt(
+            rec.miles or 0, rec.vehicle_type or user.vehicle_type, user,
+            updated=updated, monthly=(rec.entry_frequency == "monthly"),
+            period_start=rec.period_start, period_end=rec.period_end)
 
     if rec.record_type == "expense":
         return _expense_prompt(rec.platform_or_vendor or rec.category,
