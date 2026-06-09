@@ -1,0 +1,54 @@
+name: changelog
+
+# Fails a PR that changes code without updating CHANGELOG.md, so feature work
+# can't silently skip the version history. Apply the "no-changelog" label to
+# exempt a PR (refactors, CI, pure docs, etc.).
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  require-changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require a CHANGELOG.md update for code changes
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          if printf ',%s,' "$LABELS" | grep -q ',no-changelog,'; then
+            echo "✓ 'no-changelog' label present — skipping."
+            exit 0
+          fi
+
+          base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          changed="$(git diff --name-only "$base" "$HEAD_SHA")"
+          echo "Changed files:"; echo "$changed"
+
+          # Code = tracked Python the product runs. Tooling/tests don't count.
+          code="$(echo "$changed" \
+            | grep -E '\.py$' \
+            | grep -vE '^(chat\.py|scripts/|.*_test\.py|test_.*\.py)$' || true)"
+
+          if [ -z "$code" ]; then
+            echo "✓ No product code changed — CHANGELOG not required."
+            exit 0
+          fi
+
+          if echo "$changed" | grep -qx 'CHANGELOG.md'; then
+            echo "✓ CHANGELOG.md was updated."
+            exit 0
+          fi
+
+          echo "::error::Product code changed but CHANGELOG.md was not updated."
+          echo "Add an entry to CHANGELOG.md (see its format), or apply the 'no-changelog' label if this PR genuinely needs none."
+          exit 1
