@@ -24,6 +24,7 @@ import config
 import export
 import extract
 import reminders
+import settings as vehicle_settings
 import tax
 import twilio_client as wa
 from models import (
@@ -420,31 +421,41 @@ def _handle_text(db, user, number, body) -> None:
     # If a mileage entry is waiting for a vehicle pick, this message is the choice.
     awaiting = latest_awaiting_vehicle(db, user.id)
     if awaiting:
-        options = _vehicle_options(db, user)
-        chosen = None
-        if low.isdigit():
-            i = int(low) - 1
-            if 0 <= i < len(options):
-                chosen = options[i]
+        # Let command words abandon the half-finished entry instead of being
+        # misread as a vehicle pick (e.g. "settings", "cancel").
+        if low in ("cancel", "stop", "settings", "setting", "menu"):
+            awaiting.confirmation_status = "rejected"
+            db.commit()
+            if low in ("cancel", "stop"):
+                wa.send_whatsapp(number, "Cancelled — no mileage saved.")
+                return
+            # fall through so the settings handler below picks it up
         else:
-            chosen = _parse_vehicle(low)
-        if chosen is None:
-            wa.send_whatsapp(number, "Please reply with the vehicle's number.\n\n"
-                             + _which_vehicle_prompt(options, tax.normalise_vehicle(user.vehicle_type)))
+            options = _vehicle_options(db, user)
+            chosen = None
+            if low.isdigit():
+                i = int(low) - 1
+                if 0 <= i < len(options):
+                    chosen = options[i]
+            else:
+                chosen = _parse_vehicle(low)
+            if chosen is None:
+                wa.send_whatsapp(number, "Please reply with the vehicle's number.\n\n"
+                                 + _which_vehicle_prompt(options, vehicle_settings.default_vehicle(user)))
+                return
+            awaiting.vehicle_type = chosen
+            awaiting.confirmation_status = "pending"
+            db.commit()
+            wa.send_whatsapp(number, _mileage_prompt(awaiting.miles or 0, chosen, user))
             return
-        awaiting.vehicle_type = chosen
-        awaiting.confirmation_status = "pending"
-        db.commit()
-        wa.send_whatsapp(number, _mileage_prompt(awaiting.miles or 0, chosen, user))
+
+    # Flow C: vehicle/settings menu, in-flow states, and NL vehicle intents.
+    # Checked after editing/awaiting (Flow B drafts win) but before the confirm
+    # shortcuts so menu number replies aren't read as confirm/edit/delete.
+    if vehicle_settings.handle(db, user, number, body):
         return
 
-    if low in ("settings", "setting"):
-        user.onboarding_step = "ask_vehicle"
-        db.commit()
-        wa.send_whatsapp(number, "Let's update your settings.\n\n" + VEHICLE_QUESTION)
-        return
-
-    if low in ("vehicles", "vehicle", "my vehicles"):
+    if low in ("vehicles", "my vehicles"):
         wa.send_whatsapp(number, export.vehicles_overview(db, user))
         return
 
@@ -573,7 +584,7 @@ def _handle_mileage_entry(db, user, number, parsed: dict) -> None:
     if parsed["kind"] == "split":
         rows = []
         for seg in parsed["segments"]:
-            vt = seg["vehicle_hint"] or tax.normalise_vehicle(user.vehicle_type)
+            vt = seg["vehicle_hint"] or vehicle_settings.default_vehicle(user)
             rec = Record(
                 user_id=user.id, record_type="mileage", record_date=parsed["record_date"],
                 category="mileage", miles=seg["miles"], vehicle_type=vt,
@@ -594,13 +605,13 @@ def _handle_mileage_entry(db, user, number, parsed: dict) -> None:
     record = Record(
         user_id=user.id, record_type="mileage", record_date=parsed["record_date"],
         category="mileage", miles=parsed["miles"],
-        vehicle_type=vehicle_hint or user.vehicle_type,
+        vehicle_type=vehicle_hint or vehicle_settings.default_vehicle(user),
         source_type=parsed["source_hint"], confidence=parsed["confidence"],
         notes=parsed["notes"] + note_suffix,
     )
 
     # Multi-vehicle user with no explicit vehicle tag: ask which vehicle first.
-    if not vehicle_hint and len(_logged_vehicle_types(db, user.id)) >= 2:
+    if not vehicle_hint and len(vehicle_settings.registered(user)) >= 2:
         record.confirmation_status = "awaiting_vehicle"
         db.add(record)
         db.commit()
@@ -661,9 +672,10 @@ def _logged_vehicle_types(db, user_id: int) -> set[str]:
 
 
 def _vehicle_options(db, user) -> list[str]:
-    """Vehicles to offer in the 'which vehicle?' prompt — active first."""
-    active = tax.normalise_vehicle(user.vehicle_type)
-    candidates = _logged_vehicle_types(db, user.id) | {active}
+    """Vehicles to offer in the 'which vehicle?' prompt — default first."""
+    active = vehicle_settings.default_vehicle(user)
+    candidates = (_logged_vehicle_types(db, user.id)
+                  | set(vehicle_settings.registered(user)) | {active})
     return [active] + [t for t in _VEHICLE_ORDER if t in candidates and t != active]
 
 

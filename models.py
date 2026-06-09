@@ -52,6 +52,14 @@ class User(Base):
     # onboarding_step: ask_vehicle | ask_tax | done
     onboarding_step: Mapped[str] = mapped_column(String(16), default="ask_vehicle")
 
+    # Flow C (vehicle settings). vehicle_type above is the *main* vehicle.
+    # default_vehicle: assumed when mileage is sent without a vehicle (falls back to main)
+    default_vehicle: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # extra_vehicles: comma-separated canonical keys the user also has (excludes main)
+    extra_vehicles: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # settings_state: where the user is in the settings menu (carries payload after ':')
+    settings_state: Mapped[str | None] = mapped_column(String(48), nullable=True)
+
     records: Mapped[list["Record"]] = relationship(back_populates="user")
 
 
@@ -114,6 +122,9 @@ _USER_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",
     "tax_rate": _FLOAT_SQL,
     "onboarding_step": "VARCHAR(16) DEFAULT 'ask_vehicle'",
+    "default_vehicle": "VARCHAR(16)",
+    "extra_vehicles": "VARCHAR(64)",
+    "settings_state": "VARCHAR(48)",
 }
 _RECORD_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",
