@@ -212,11 +212,9 @@ def _h_menu(db, user, number, low, payload):
         db.commit()
         wa.send_whatsapp(number, _TAX_MENU)
     elif choice in ("3", "reminder settings", "reminder", "reminders"):
-        wa.send_whatsapp(
-            number,
-            "Reminders are sent every Sunday evening. Custom reminder times are "
-            "coming soon.\n\nType MENU to go back, or DONE to close settings.",
-        )
+        _go(user, "reminder")
+        db.commit()
+        wa.send_whatsapp(number, _reminder_menu(user))
     elif choice in ("4", "subscription / payment", "subscription", "payment"):
         wa.send_whatsapp(
             number,
@@ -251,6 +249,36 @@ def _h_tax(db, user, number, low, payload):
     db.commit()
     wa.send_whatsapp(number, f"Updated ✅ I'll use {_TAX_LABELS[rate]} for rough "
                      "tax-benefit estimates.")
+
+
+def _reminder_menu(user) -> str:
+    current = (getattr(user, "log_frequency", "weekly") or "weekly").capitalize()
+    return (
+        "Logging frequency\n\n"
+        f"Currently: {current}\n\n"
+        "How often do you want to log your miles and earnings?\n\n"
+        + _numbered(["Weekly (recommended)", "Monthly", "Back"])
+        + "\n\nReminders are sent every Sunday evening for now."
+    )
+
+
+def _h_reminder(db, user, number, low, payload):
+    if low in ("1", "weekly", "weekly (recommended)"):
+        user.log_frequency = "weekly"
+        _go(user, None)
+        db.commit()
+        wa.send_whatsapp(number, "Updated ✅ I'll treat new entries as weekly by "
+                         "default. You can still say \"this month\" any time.")
+    elif low in ("2", "monthly"):
+        user.log_frequency = "monthly"
+        _go(user, None)
+        db.commit()
+        wa.send_whatsapp(number, "Updated ✅ I'll treat new entries as monthly by "
+                         "default. You can still say \"this week\" any time.")
+    elif low in ("3", "back", "cancel"):
+        _back_to_menu(db, user, number)
+    else:
+        wa.send_whatsapp(number, "Please reply 1, 2 or 3.\n\n" + _reminder_menu(user))
 
 
 def _h_vehicle(db, user, number, low, payload):
@@ -505,6 +533,7 @@ def _back_to_vehicle(db, user, number):
 _STATES = {
     "menu": _h_menu,
     "tax": _h_tax,
+    "reminder": _h_reminder,
     "vehicle": _h_vehicle,
     "add": _h_add,
     "added": _h_added,

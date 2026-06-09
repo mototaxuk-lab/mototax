@@ -62,6 +62,9 @@ class User(Base):
     # expecting: one-shot hint for the next message ("earnings"), so a bare number
     # is read as earnings when we just asked for them instead of as mileage.
     expecting: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # log_frequency: default period when a message doesn't say week/month.
+    # "weekly" | "monthly". A per-message "this month"/"this week" still overrides.
+    log_frequency: Mapped[str] = mapped_column(String(8), default="weekly")
 
     records: Mapped[list["Record"]] = relationship(back_populates="user")
 
@@ -129,6 +132,7 @@ _USER_ADDED_COLUMNS = {
     "extra_vehicles": "VARCHAR(64)",
     "settings_state": "VARCHAR(48)",
     "expecting": "VARCHAR(16)",
+    "log_frequency": "VARCHAR(8) DEFAULT 'weekly'",
 }
 _RECORD_ADDED_COLUMNS = {
     "vehicle_type": "VARCHAR(16)",

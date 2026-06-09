@@ -467,6 +467,17 @@ def _handle_media(db, user, number, params, num_media) -> None:
             wa.send_whatsapp(number, prompt)
 
 
+def _resolve_monthly(user, body: str) -> bool:
+    """Decide if an entry is monthly: an explicit word in the message wins,
+    otherwise fall back to the user's logging-frequency preference."""
+    low = body.lower()
+    if "month" in low:
+        return True
+    if "week" in low:
+        return False
+    return (getattr(user, "log_frequency", "weekly") or "weekly") == "monthly"
+
+
 def _is_new_loggable(body: str) -> str | None:
     """If `body` clearly starts a brand-new entry, return its type, else None.
     Used so a half-finished draft (e.g. 'which platform?') doesn't swallow it.
@@ -806,17 +817,24 @@ def _handle_text(db, user, number, body) -> None:
 
     # Try to read it as a mileage entry. Handles single / split / monthly /
     # personal+delivery / vehicle-tagged inputs (see extract.parse_mileage_text).
+    # Period: an explicit "month"/"week" in the message wins; otherwise use the
+    # user's logging-frequency preference (default weekly).
+    monthly = _resolve_monthly(user, body)
+    ad_hoc_monthly = "month" in low  # they typed it this time → suggest weekly
+
     mileage = extract.parse_mileage_text(body)
     if mileage:
         # If we just asked for earnings and they sent a bare number (no "miles"
         # unit), treat it as earnings instead — that's what they meant.
         if expecting == "earnings" and extract.is_bare_number(body):
             _handle_earnings_entry(db, user, number, {
-                "kind": "single", "monthly": mileage.get("monthly", False),
+                "kind": "single", "monthly": monthly,
                 "platform_missing": True,
                 "entries": [{"platform": None, "amount": mileage["miles"]}],
             })
             return
+        mileage["monthly"] = monthly
+        mileage["recommend_weekly"] = ad_hoc_monthly
         _handle_mileage_entry(db, user, number, mileage)
         return
 
@@ -830,6 +848,7 @@ def _handle_text(db, user, number, body) -> None:
     # Try to read it as manual earnings (Flow D): "Uber Eats £320" etc.
     earnings = extract.parse_earnings_text(body)
     if earnings:
+        earnings["monthly"] = monthly
         _handle_earnings_entry(db, user, number, earnings)
         return
 
@@ -897,7 +916,8 @@ def _handle_mileage_entry(db, user, number, parsed: dict) -> None:
 
     prompt = _mileage_prompt(parsed["miles"], record.vehicle_type, user,
                              monthly=parsed.get("monthly", False),
-                             personal_excluded=parsed.get("personal_excluded"))
+                             personal_excluded=parsed.get("personal_excluded"),
+                             recommend_weekly=parsed.get("recommend_weekly", False))
     if high_warning:
         prompt = (f"That looks unusually high for one week.\n"
                   f"Did you mean {parsed['miles']:,.0f} delivery miles for this week?\n\n" + prompt)
@@ -1127,7 +1147,8 @@ def _money(value: float) -> str:
 
 
 def _mileage_prompt(miles: float, vehicle_type, user, updated: bool = False,
-                    monthly: bool = False, personal_excluded: float | None = None) -> str:
+                    monthly: bool = False, personal_excluded: float | None = None,
+                    recommend_weekly: bool = False) -> str:
     """Confirmation text for a mileage entry, with deduction + tax-benefit estimate."""
     deduction = tax.mileage_deduction(miles, vehicle_type)
     period = "this month" if monthly else "this week"
@@ -1144,7 +1165,7 @@ def _mileage_prompt(miles: float, vehicle_type, user, updated: bool = False,
         benefit = tax.tax_benefit(deduction, user.tax_rate)
         msg += (f"\nEstimated tax benefit: up to ~£{_money(benefit)}, "
                 f"assuming {user.tax_rate * 100:.0f}% tax rate.")
-    if monthly:
+    if recommend_weekly:
         msg += ("\n\nFor better accuracy, weekly mileage is recommended because it is "
                 "fresher.")
     msg += f"\n\nConfirm?\n{_OPTIONS_FOOTER}"
