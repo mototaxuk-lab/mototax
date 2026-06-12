@@ -32,6 +32,32 @@ deployed on Railway.
 - **Twilio trial cap.** Onboarding sends many messages (Terms/Privacy gate + setup); the
   Twilio trial account's 50-messages/day limit blocks replies once exceeded. Resolved by
   upgrading the Twilio account out of trial.
+- **Meta WhatsApp Cloud API backend.** The transport is now pluggable (see 0.7.0); a direct
+  Meta backend would drop Twilio's BSP markup and the trial cap. Deferred until volume makes
+  the Meta business-verification setup worth it.
+
+---
+
+## [0.7.0] — 2026-06-11
+
+Make the WhatsApp transport pluggable so the app isn't hard-wired to Twilio.
+
+### Changed
+- **Messaging transport is now an abstraction (`messaging.py`).** The app talks to a
+  generic `Messenger` instead of Twilio directly. Backends:
+  - `TwilioMessenger` — the production WhatsApp backend (unchanged behaviour).
+  - `ConsoleMessenger` — prints messages, needs no account; used for local dev/tests
+    and as a safe fallback when no provider is configured.
+- New `MESSAGING_PROVIDER` setting (`auto` | `twilio` | `console`); `auto` (default)
+  uses Twilio when its credentials are present, otherwise the console. Existing
+  deployments are unaffected — with Twilio creds set, `auto` selects Twilio.
+- Adding another provider later (e.g. the Meta WhatsApp Cloud API, to drop the BSP
+  markup) is now a single new `Messenger` subclass; no call sites change.
+
+### Removed
+- `twilio_client.py` — its logic moved into `messaging.TwilioMessenger`. The `wa.*`
+  call sites (`send_whatsapp`, `send_whatsapp_template`, `verify_signature`,
+  `download_media`) are unchanged; only the import they resolve to moved.
 
 ---
 
@@ -219,7 +245,8 @@ Initial MVP backend and first Railway deployment.
 
 ---
 
-[Unreleased]: https://github.com/mototaxuk-lab/mototax/compare/0e0bca8...HEAD
+[Unreleased]: https://github.com/mototaxuk-lab/mototax/compare/c1e19d5...HEAD
+[0.7.0]: https://github.com/mototaxuk-lab/mototax/compare/c1e19d5...HEAD
 [0.6.0]: https://github.com/mototaxuk-lab/mototax/pull/17
 [0.5.0]: https://github.com/mototaxuk-lab/mototax/compare/a17c49b...223ea5b
 [0.4.0]: https://github.com/mototaxuk-lab/mototax/pull/7

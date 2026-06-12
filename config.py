@@ -17,6 +17,11 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # Haiku 4.5 is the right tier for image extraction: cheapest current model, supports vision.
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
+# --- Messaging transport ---
+# Which WhatsApp backend to use: "auto" (Twilio if its creds are set, else the
+# console/no-op backend), "twilio", or "console". See messaging.py.
+MESSAGING_PROVIDER = os.environ.get("MESSAGING_PROVIDER", "auto")
+
 # --- Twilio ---
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")

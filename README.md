@@ -7,12 +7,13 @@ mileage messages into a confirmed, tax-ready ledger and an accountant-ready CSV.
 Postgres · deploys on Railway from GitHub.
 
 <!-- VERSION:START — auto-generated from CHANGELOG.md by .githooks/pre-push; do not edit by hand -->
-![Version](https://img.shields.io/badge/version-0.6.0-blue) ![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-informational)
+![Version](https://img.shields.io/badge/version-0.7.0-blue) ![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-informational)
 
 ### Version history
 
 | Version | Date | Summary |
 |---------|------|---------|
+| **0.7.0** | 2026-06-11 | Make the WhatsApp transport pluggable so the app isn't hard-wired to Twilio. |
 | **0.6.0** | 2026-06-09 | Richer mileage edit menu, and a fix so editing no longer loses the period. (PR #17) |
 | **0.5.0** | 2026-06-09 | Flows F–K: summaries, Excel export pack, shared period picker, settings hub, access status, graceful help, and the legal/data-rights flow. (PRs #9–#16) |
 | **0.4.0** | 2026-06-09 | Full product flows A–E. Brings `main` up to date with the complete onboarding/records feature set. (PR #7) |
@@ -47,7 +48,7 @@ self-reported estimate.
 | `main.py` | FastAPI app, webhook, message router, CSV download endpoint |
 | `extract.py` | Claude vision extraction + local mileage text parsing |
 | `models.py` | Postgres/SQLite models and helpers |
-| `twilio_client.py` | Send messages, verify webhook signatures, download media |
+| `messaging.py` | Transport abstraction — Twilio + console backends, swappable via `MESSAGING_PROVIDER` |
 | `export.py` | CSV builder + weekly summary (with the 2026/27 55p mileage rate) |
 | `config.py` | Reads all secrets from environment variables |
 | `CHANGELOG.md` | Versioned history of all product changes (source of truth) |

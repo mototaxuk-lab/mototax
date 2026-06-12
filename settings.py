@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import tax
 import config
-import twilio_client as wa
+import messaging as wa
 from models import make_export_link
 
 _ORDER = ("car_van", "motorbike", "bicycle")

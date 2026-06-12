@@ -36,7 +36,7 @@ os.environ.setdefault("PUBLIC_BASE_URL", "http://localhost:8080")
 import config  # noqa: E402
 import extract  # noqa: E402
 import main  # noqa: E402
-import twilio_client as wa  # noqa: E402
+import messaging as wa  # noqa: E402  (the transport seam; we override its sends below)
 from models import SessionLocal, User, init_db  # noqa: E402
 
 
@@ -55,7 +55,7 @@ def _print_bot_template(to: str, content_sid: str, variables=None) -> None:
 
 wa.send_whatsapp = _print_bot
 wa.send_whatsapp_template = _print_bot_template
-main.wa.send_whatsapp = _print_bot          # main imported it as `wa`
+main.wa.send_whatsapp = _print_bot          # main/settings import the same module
 main.wa.send_whatsapp_template = _print_bot_template
 
 

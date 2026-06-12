@@ -27,7 +27,7 @@ import periods
 import reminders
 import settings as vehicle_settings
 import tax
-import twilio_client as wa
+import messaging as wa
 from models import (
     ExportLink, Record, SessionLocal, User, get_or_create_user, init_db,
     latest_awaiting_platform, latest_awaiting_vehicle, latest_editing,
